@@ -366,12 +366,119 @@ def fix_corrupted_tool_use() -> str:
     return f"Repaired {total_fixed} tool_use block(s) in {sessions_fixed} session(s). Backups created."
 
 
+def check_orphaned_tool_results() -> CheckResult:
+    """Check for orphaned tool_result blocks missing their matching tool_use.
+
+    The Claude API requires every tool_result to have a corresponding tool_use
+    in the preceding message. Orphans cause 400 errors on compact/resume.
+
+    This can happen when pruning strategies remove messages with tool_use blocks
+    but leave the paired tool_result in a later message.
+    """
+    sessions = find_sessions()
+    orphaned_sessions = []
+
+    for sess in sessions:
+        try:
+            count = _count_orphaned_tool_results(sess["path"])
+            if count > 0:
+                orphaned_sessions.append((sess, count))
+        except (OSError, UnicodeDecodeError):
+            continue
+
+    if not orphaned_sessions:
+        return CheckResult(
+            name="orphaned-tool-results",
+            status="ok",
+            message=f"No orphaned tool_result blocks found ({len(sessions)} sessions checked)",
+        )
+
+    details = ", ".join(
+        f"{s['session_id'][:8]}…({count} blocks)"
+        for s, count in sorted(orphaned_sessions, key=lambda x: x[1], reverse=True)[:5]
+    )
+    total = sum(c for _, c in orphaned_sessions)
+
+    return CheckResult(
+        name="orphaned-tool-results",
+        status="issue",
+        message=(
+            f"{total} orphaned tool_result block(s) in {len(orphaned_sessions)} session(s): {details}. "
+            f"These cause 400 API errors on compact/resume."
+        ),
+        fix_description="Remove orphaned tool_result blocks (matching tool_use was removed by pruning or compaction)",
+    )
+
+
+def _count_orphaned_tool_results(path: Path) -> int:
+    """Count orphaned tool_result blocks in a session file."""
+    import json as _json
+
+    tool_use_ids: set[str] = set()
+    all_results: list[str] = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            content = obj.get("message", {}).get("content", [])
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if block.get("type") == "tool_use":
+                    use_id = block.get("id", "")
+                    if use_id:
+                        tool_use_ids.add(use_id)
+                elif block.get("type") == "tool_result":
+                    use_id = block.get("tool_use_id", "")
+                    if use_id:
+                        all_results.append(use_id)
+
+    return sum(1 for r in all_results if r not in tool_use_ids)
+
+
+def fix_orphaned_tool_results() -> str:
+    """Remove orphaned tool_result blocks from all sessions."""
+    from .session import load_messages, save_messages
+
+    sessions = find_sessions()
+    total_fixed = 0
+    sessions_fixed = 0
+
+    for sess in sessions:
+        try:
+            count = _count_orphaned_tool_results(sess["path"])
+            if count == 0:
+                continue
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        from .executor import fix_orphaned_tool_results as _fix
+        messages = load_messages(sess["path"])
+        fixed_messages, orphans = _fix(messages)
+
+        if orphans > 0:
+            save_messages(sess["path"], fixed_messages, create_backup=True)
+            total_fixed += orphans
+            sessions_fixed += 1
+
+    if total_fixed == 0:
+        return "No orphaned tool_result blocks found."
+    return f"Removed {total_fixed} orphaned tool_result block(s) in {sessions_fixed} session(s). Backups created."
+
+
 # ─── Registry ────────────────────────────────────────────────────────────────
 
 # (name, check_fn, fix_fn_or_None)
 ALL_CHECKS: list[tuple[str, callable, callable | None]] = [
     ("trust-dialog-hang", check_trust_dialog_hang, fix_trust_dialog_hang),
     ("corrupted-tool-use", check_corrupted_tool_use, fix_corrupted_tool_use),
+    ("orphaned-tool-results", check_orphaned_tool_results, fix_orphaned_tool_results),
     ("oversized-sessions", check_oversized_sessions, None),
     ("stale-backups", check_stale_backups, fix_stale_backups),
     ("disk-usage", check_disk_usage, None),
