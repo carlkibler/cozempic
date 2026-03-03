@@ -426,15 +426,18 @@ cozempic doctor --fix  # Auto-fix where possible
 
 Current checks:
 
-| Check | What It Detects |
-|-------|----------------|
-| `trust-dialog-hang` | `hasTrustDialogAccepted=true` in `~/.claude.json` causing resume hangs on Windows |
-| `corrupted-tool-use` | `tool_use.name` >200 chars from serialization bugs — causes unrecoverable 400 errors ([#25812](https://github.com/anthropics/claude-code/issues/25812)) |
-| `oversized-sessions` | Session files >50MB likely to hang on resume |
-| `stale-backups` | Old `.bak` files from previous treatments wasting disk |
-| `disk-usage` | Total session storage exceeding healthy thresholds |
+| Check | What It Detects | Auto-Fix |
+|-------|----------------|----------|
+| `trust-dialog-hang` | `hasTrustDialogAccepted=true` causing resume hangs on Windows | Reset flag |
+| `claude-json-corruption` | Truncated JSON, missing auth, corruption cascades from concurrent sessions ([#28847](https://github.com/anthropics/claude-code/issues/28847)) | Restore from backup |
+| `corrupted-tool-use` | `tool_use.name` >200 chars from serialization bugs ([#25812](https://github.com/anthropics/claude-code/issues/25812)) | Parse and repair |
+| `orphaned-tool-results` | `tool_result` blocks missing their matching `tool_use` — causes 400 errors on compact/resume | Strip orphans |
+| `zombie-teams` | Stale team directories with idle/dead agents ([#29908](https://github.com/anthropics/claude-code/issues/29908)) | Remove stale dirs |
+| `oversized-sessions` | Session files >50MB likely to hang on resume | — |
+| `stale-backups` | Old `.bak` files from previous treatments wasting disk | Delete old backups |
+| `disk-usage` | Total session storage exceeding healthy thresholds | — |
 
-The `--fix` flag auto-applies fixes where safe (e.g., resetting the trust dialog flag, cleaning stale backups). Backups are created before any config modification.
+The `--fix` flag auto-applies all available fixes with backups created before any modification.
 
 ## Claude Code Integration
 
