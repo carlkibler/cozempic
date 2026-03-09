@@ -589,6 +589,180 @@ def fix_claude_json_corruption() -> str:
     return "No valid backup found among existing backup files."
 
 
+def check_hooks_trust_flag() -> CheckResult:
+    """Check for hasTrustDialogHooksAccepted missing in .claude.json.
+
+    Since v2.1.51, Claude Code introduced a separate hooks trust gate.
+    hasTrustDialogHooksAccepted must be true for hooks (SessionStart,
+    PreToolUse, etc.) to load. This flag is never written automatically
+    even when the user accepts the workspace trust dialog, causing hooks
+    to silently fail with no error message.
+
+    Ref: anthropics/claude-code#32424
+    """
+    claude_json = get_claude_json_path()
+
+    if not claude_json.exists():
+        return CheckResult(
+            name="hooks-trust-flag",
+            status="ok",
+            message=f"No {claude_json} found (fresh install)",
+        )
+
+    try:
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        return CheckResult(
+            name="hooks-trust-flag",
+            status="warning",
+            message=f"Could not read {claude_json}: {e}",
+        )
+
+    if not isinstance(data, dict):
+        return CheckResult(
+            name="hooks-trust-flag",
+            status="ok",
+            message="No project entries found",
+        )
+
+    # Find entries where workspace is trusted but hooks trust flag is missing
+    missing = []
+
+    if data.get("hasTrustDialogAccepted") is True and not data.get("hasTrustDialogHooksAccepted"):
+        missing.append("top-level")
+
+    for key, value in data.items():
+        if isinstance(value, dict):
+            if value.get("hasTrustDialogAccepted") is True and not value.get("hasTrustDialogHooksAccepted"):
+                missing.append(key[:60])
+
+    if not missing:
+        return CheckResult(
+            name="hooks-trust-flag",
+            status="ok",
+            message="Hooks trust flag set correctly — hooks will load normally",
+        )
+
+    return CheckResult(
+        name="hooks-trust-flag",
+        status="issue",
+        message=(
+            f"hasTrustDialogHooksAccepted missing in {len(missing)} location(s). "
+            f"Hooks (SessionStart, PreToolUse, etc.) silently blocked even after trust accepted (v2.1.51+ bug). "
+            f"Affected: {', '.join(missing[:3])}"
+        ),
+        fix_description="Set hasTrustDialogHooksAccepted=true for all trusted workspaces",
+    )
+
+
+def fix_hooks_trust_flag() -> str:
+    """Fix missing hasTrustDialogHooksAccepted for all trusted workspaces."""
+    claude_json = get_claude_json_path()
+
+    if not claude_json.exists():
+        return f"No {claude_json} found — nothing to fix."
+
+    try:
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        return f"Could not read {claude_json}: {e}"
+
+    if not isinstance(data, dict):
+        return "No project entries found — nothing to fix."
+
+    changed = 0
+
+    if data.get("hasTrustDialogAccepted") is True and not data.get("hasTrustDialogHooksAccepted"):
+        data["hasTrustDialogHooksAccepted"] = True
+        changed += 1
+
+    for key, value in data.items():
+        if isinstance(value, dict):
+            if value.get("hasTrustDialogAccepted") is True and not value.get("hasTrustDialogHooksAccepted"):
+                value["hasTrustDialogHooksAccepted"] = True
+                changed += 1
+
+    if changed == 0:
+        return "No missing hooks trust flags — nothing to fix."
+
+    backup = claude_json.parent / ".claude.json.bak"
+    shutil.copy2(claude_json, backup)
+    claude_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return f"Set hasTrustDialogHooksAccepted=true in {changed} location(s). Hooks will load on next Claude start."
+
+
+def check_agent_model_mismatch() -> CheckResult:
+    """Check for missing model config that breaks agent team inheritance.
+
+    When Claude Code spawns subagents in agent teams, they may not inherit
+    the team lead's model, defaulting to claude-opus-4-6 and causing 403
+    errors on custom or restricted endpoints.
+
+    Ref: anthropics/claude-code#32368
+    """
+    claude_dir = get_claude_dir()
+    settings_path = claude_dir / "settings.json"
+    teams_dir = claude_dir / "teams"
+
+    # Only relevant if teams are in use
+    if not teams_dir.is_dir():
+        return CheckResult(
+            name="agent-model-mismatch",
+            status="ok",
+            message="No agent teams directory — model inheritance not applicable",
+        )
+
+    try:
+        team_dirs = [d for d in teams_dir.iterdir() if d.is_dir()]
+    except OSError:
+        team_dirs = []
+
+    if not team_dirs:
+        return CheckResult(
+            name="agent-model-mismatch",
+            status="ok",
+            message="No agent teams in use — model inheritance not applicable",
+        )
+
+    if not settings_path.exists():
+        return CheckResult(
+            name="agent-model-mismatch",
+            status="warning",
+            message=(
+                f"Agent teams active ({len(team_dirs)} team(s)) but no ~/.claude/settings.json found. "
+                "Spawned subagents will default to claude-opus-4-6 regardless of ANTHROPIC_MODEL env var."
+            ),
+            fix_description='Create ~/.claude/settings.json with {"model": "your-model-id"} to ensure subagents inherit the correct model',
+        )
+
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        return CheckResult(
+            name="agent-model-mismatch",
+            status="warning",
+            message=f"Could not read settings.json: {e}",
+        )
+
+    model = settings.get("model") if isinstance(settings, dict) else None
+    if not model:
+        return CheckResult(
+            name="agent-model-mismatch",
+            status="warning",
+            message=(
+                f"Agent teams active ({len(team_dirs)} team(s)) but no model set in ~/.claude/settings.json. "
+                "Spawned subagents may default to claude-opus-4-6 causing 403 errors on restricted endpoints."
+            ),
+            fix_description='Add "model": "claude-opus-4-6" to ~/.claude/settings.json to ensure subagents inherit the correct model',
+        )
+
+    return CheckResult(
+        name="agent-model-mismatch",
+        status="ok",
+        message=f"Model '{model}' set in settings.json — subagents should inherit correctly",
+    )
+
+
 def check_zombie_teams() -> CheckResult:
     """Check for stale/zombie team directories in ~/.claude/teams/.
 
@@ -707,10 +881,12 @@ def fix_zombie_teams() -> str:
 # (name, check_fn, fix_fn_or_None)
 ALL_CHECKS: list[tuple[str, callable, callable | None]] = [
     ("trust-dialog-hang", check_trust_dialog_hang, fix_trust_dialog_hang),
+    ("hooks-trust-flag", check_hooks_trust_flag, fix_hooks_trust_flag),
     ("claude-json-corruption", check_claude_json_corruption, fix_claude_json_corruption),
     ("corrupted-tool-use", check_corrupted_tool_use, fix_corrupted_tool_use),
     ("orphaned-tool-results", check_orphaned_tool_results, fix_orphaned_tool_results),
     ("zombie-teams", check_zombie_teams, fix_zombie_teams),
+    ("agent-model-mismatch", check_agent_model_mismatch, None),
     ("oversized-sessions", check_oversized_sessions, None),
     ("stale-backups", check_stale_backups, fix_stale_backups),
     ("disk-usage", check_disk_usage, None),

@@ -10,11 +10,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cozempic.doctor import (
+    check_agent_model_mismatch,
     check_claude_json_corruption,
     check_corrupted_tool_use,
+    check_hooks_trust_flag,
     check_orphaned_tool_results,
     check_zombie_teams,
     fix_claude_json_corruption,
+    fix_hooks_trust_flag,
 )
 
 
@@ -218,6 +221,119 @@ class TestZombieTeams(unittest.TestCase):
         with patch("cozempic.doctor.get_claude_dir", return_value=claude_dir):
             result = check_zombie_teams()
         self.assertEqual(result.status, "ok")
+
+
+class TestHooksTrustFlag(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.claude_json = Path(self.tmpdir) / ".claude.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_trusted_workspace_missing_hooks_flag_is_issue(self):
+        self.claude_json.write_text(json.dumps({
+            "/path/to/project": {"hasTrustDialogAccepted": True},
+        }))
+        with patch("cozempic.doctor.get_claude_json_path", return_value=self.claude_json):
+            result = check_hooks_trust_flag()
+        self.assertEqual(result.status, "issue")
+        self.assertIn("hasTrustDialogHooksAccepted", result.message)
+
+    def test_trusted_workspace_with_hooks_flag_is_ok(self):
+        self.claude_json.write_text(json.dumps({
+            "/path/to/project": {
+                "hasTrustDialogAccepted": True,
+                "hasTrustDialogHooksAccepted": True,
+            },
+        }))
+        with patch("cozempic.doctor.get_claude_json_path", return_value=self.claude_json):
+            result = check_hooks_trust_flag()
+        self.assertEqual(result.status, "ok")
+
+    def test_untrusted_workspace_is_ok(self):
+        self.claude_json.write_text(json.dumps({
+            "/path/to/project": {"hasTrustDialogAccepted": False},
+        }))
+        with patch("cozempic.doctor.get_claude_json_path", return_value=self.claude_json):
+            result = check_hooks_trust_flag()
+        self.assertEqual(result.status, "ok")
+
+    def test_missing_file_is_ok(self):
+        missing = Path(self.tmpdir) / "nonexistent.json"
+        with patch("cozempic.doctor.get_claude_json_path", return_value=missing):
+            result = check_hooks_trust_flag()
+        self.assertEqual(result.status, "ok")
+
+    def test_fix_sets_hooks_flag(self):
+        self.claude_json.write_text(json.dumps({
+            "/path/to/project": {"hasTrustDialogAccepted": True},
+        }))
+        with patch("cozempic.doctor.get_claude_json_path", return_value=self.claude_json):
+            msg = fix_hooks_trust_flag()
+        self.assertIn("1", msg)
+        data = json.loads(self.claude_json.read_text())
+        self.assertTrue(data["/path/to/project"]["hasTrustDialogHooksAccepted"])
+
+    def test_fix_multiple_projects(self):
+        self.claude_json.write_text(json.dumps({
+            "/project/a": {"hasTrustDialogAccepted": True},
+            "/project/b": {"hasTrustDialogAccepted": True},
+            "/project/c": {"hasTrustDialogAccepted": False},
+        }))
+        with patch("cozempic.doctor.get_claude_json_path", return_value=self.claude_json):
+            msg = fix_hooks_trust_flag()
+        self.assertIn("2", msg)
+        data = json.loads(self.claude_json.read_text())
+        self.assertTrue(data["/project/a"]["hasTrustDialogHooksAccepted"])
+        self.assertTrue(data["/project/b"]["hasTrustDialogHooksAccepted"])
+        self.assertNotIn("hasTrustDialogHooksAccepted", data["/project/c"])
+
+
+class TestAgentModelMismatch(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.claude_dir = Path(self.tmpdir) / ".claude"
+        self.claude_dir.mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_no_teams_dir_is_ok(self):
+        with patch("cozempic.doctor.get_claude_dir", return_value=self.claude_dir):
+            result = check_agent_model_mismatch()
+        self.assertEqual(result.status, "ok")
+
+    def test_empty_teams_dir_is_ok(self):
+        (self.claude_dir / "teams").mkdir()
+        with patch("cozempic.doctor.get_claude_dir", return_value=self.claude_dir):
+            result = check_agent_model_mismatch()
+        self.assertEqual(result.status, "ok")
+
+    def test_teams_with_model_in_settings_is_ok(self):
+        (self.claude_dir / "teams" / "my-team").mkdir(parents=True)
+        (self.claude_dir / "settings.json").write_text(
+            json.dumps({"model": "claude-opus-4-6"})
+        )
+        with patch("cozempic.doctor.get_claude_dir", return_value=self.claude_dir):
+            result = check_agent_model_mismatch()
+        self.assertEqual(result.status, "ok")
+        self.assertIn("claude-opus-4-6", result.message)
+
+    def test_teams_without_model_in_settings_is_warning(self):
+        (self.claude_dir / "teams" / "my-team").mkdir(parents=True)
+        (self.claude_dir / "settings.json").write_text(json.dumps({"theme": "dark"}))
+        with patch("cozempic.doctor.get_claude_dir", return_value=self.claude_dir):
+            result = check_agent_model_mismatch()
+        self.assertEqual(result.status, "warning")
+
+    def test_teams_without_settings_file_is_warning(self):
+        (self.claude_dir / "teams" / "my-team").mkdir(parents=True)
+        with patch("cozempic.doctor.get_claude_dir", return_value=self.claude_dir):
+            result = check_agent_model_mismatch()
+        self.assertEqual(result.status, "warning")
 
 
 if __name__ == "__main__":
