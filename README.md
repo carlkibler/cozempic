@@ -103,8 +103,9 @@ cozempic checkpoint --show
 # Or run manually with custom thresholds:
 cozempic guard --threshold 50 -rx standard
 
-# Guard with token-based thresholds (fires whichever is hit first):
-cozempic guard --threshold 50 --threshold-tokens 180000
+# Guard now defaults to token-based thresholds automatically (75%/45% of context window)
+# Override if needed for heavy configs (many rules files, MCP servers):
+cozempic guard --system-overhead-tokens 34000
 
 # Run as background daemon (what the SessionStart hook uses):
 cozempic guard --daemon
@@ -166,8 +167,9 @@ cozempic reload [-rx PRESET]                Treat + auto-resume in new terminal
 cozempic checkpoint [--show]                Save team/agent state to disk (no pruning)
 cozempic guard [--threshold MB]             Tiered guard: checkpoint + soft/hard prune
 cozempic guard --soft-threshold 25          Custom soft threshold (default: 60% of hard)
-cozempic guard --threshold-tokens 180000    Hard threshold in tokens (alongside --threshold)
-cozempic guard --soft-threshold-tokens N    Soft threshold in tokens
+cozempic guard --threshold-tokens 180000    Override hard threshold in tokens (default: 75% of context window)
+cozempic guard --soft-threshold-tokens N    Override soft threshold in tokens (default: 45% of context window)
+cozempic guard --system-overhead-tokens N   Override system overhead estimate (default: 21000)
 cozempic guard --no-reactive                Disable reactive overflow recovery
 cozempic doctor [--fix]                     Check for known Claude Code issues
 cozempic formulary                          Show all strategies & prescriptions
@@ -258,7 +260,7 @@ When agent team sessions go idle, Claude's InboxPoller can deliver all queued te
 
 Disable with `--no-reactive` if needed. Zero impact on normal sessions — the watcher runs silently and fast-path exits for small files.
 
-The soft threshold defaults to 60% of the hard threshold. This gives a two-phase degradation: trim early and often, escalate only when needed.
+Token thresholds now default automatically to 75% (hard) and 45% (soft) of the detected context window — no flags needed. The byte soft threshold defaults to 60% of the hard threshold. If your setup has heavy rules files, MCP servers, or a large CLAUDE.md, use `--system-overhead-tokens` to get more accurate estimates (the default 21K can underestimate by 10K+ tokens in complex configs).
 
 ```bash
 # Standard — run in a separate terminal
@@ -273,8 +275,11 @@ cozempic guard --threshold 50 --no-reload
 # Disable reactive overflow recovery (polling only)
 cozempic guard --no-reactive
 
-# Token-based thresholds (fires whichever is hit first)
-cozempic guard --threshold 50 --threshold-tokens 180000 --soft-threshold-tokens 120000
+# Token thresholds are automatic — override only if needed
+cozempic guard --threshold 50 --threshold-tokens 160000 --soft-threshold-tokens 100000
+
+# Heavy config (many rules files, MCP servers) — increase overhead estimate for accuracy
+cozempic guard --system-overhead-tokens 35000
 
 # Aggressive at hard threshold, gentle at soft (automatic)
 cozempic guard --threshold 30 -rx aggressive
@@ -289,8 +294,8 @@ Output:
   Size:        5.4MB
   Soft:        30.0MB (gentle prune, no reload)
   Hard:        50.0MB (full prune + reload)
-  Soft tokens: 120,000
-  Hard tokens: 180,000
+  Soft tokens: 90,000 (auto)
+  Hard tokens: 150,000 (auto)
   Rx:          gentle (soft) / standard (hard)
   Interval:    30s
   Team-protect: enabled

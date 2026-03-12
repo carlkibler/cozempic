@@ -482,6 +482,9 @@ def cmd_guard(args):
     """Start the guard daemon to prevent compaction-induced state loss."""
     session_id = args.session or None
 
+    if getattr(args, "system_overhead_tokens", None):
+        os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = str(args.system_overhead_tokens)
+
     if args.daemon:
         result = start_guard_daemon(
             cwd=args.cwd or os.getcwd(),
@@ -654,7 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.9.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.0.0")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")
@@ -717,6 +720,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_guard.add_argument("--no-reactive", action="store_true", help="Disable reactive overflow recovery (kqueue/polling watcher)")
     p_guard.add_argument("--daemon", action="store_true", help="Run in background (PID file prevents double-starts)")
     p_guard.add_argument("--session", help="Explicit session ID or path (bypasses auto-detection)")
+    p_guard.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead token estimate (default: 21000). Increase for heavy configs with many rules files, MCP servers, or large CLAUDE.md")
 
     # init
     p_init = sub.add_parser("init", help="Auto-wire hooks and slash command into this project")
@@ -733,12 +737,58 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
+_SUBCOMMANDS = {
+    "list", "current", "diagnose", "treat", "strategy", "reload",
+    "checkpoint", "guard", "init", "doctor", "formulary",
+}
 
-    # Set overrides via env vars (used by tokens.py)
-    if args.context_window:
+
+def _prescan_argv(argv: list[str]) -> list[str]:
+    """Extract global flags from anywhere in argv, setting env vars as a side effect.
+
+    Argparse requires root-level flags before the subcommand name; this lets users
+    put --context-window and --system-overhead-tokens anywhere (#13).
+    Returns cleaned argv with those flags removed so argparse sees the rest normally.
+    """
+    cleaned: list[str] = []
+    i = 0
+    sub_seen = False
+    while i < len(argv):
+        tok = argv[i]
+        if not sub_seen and tok in _SUBCOMMANDS:
+            sub_seen = True
+            cleaned.append(tok)
+            i += 1
+            continue
+        if sub_seen:
+            if tok == "--context-window" and i + 1 < len(argv):
+                os.environ["COZEMPIC_CONTEXT_WINDOW"] = argv[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--context-window="):
+                os.environ["COZEMPIC_CONTEXT_WINDOW"] = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if tok == "--system-overhead-tokens" and i + 1 < len(argv):
+                os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = argv[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--system-overhead-tokens="):
+                os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = tok.split("=", 1)[1]
+                i += 1
+                continue
+        cleaned.append(tok)
+        i += 1
+    return cleaned
+
+
+def main():
+    argv = _prescan_argv(sys.argv[1:])
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    # Also handle --context-window when placed before the subcommand (root parser)
+    if getattr(args, "context_window", None):
         os.environ["COZEMPIC_CONTEXT_WINDOW"] = str(args.context_window)
     if args.system_overhead_tokens:
         os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = str(args.system_overhead_tokens)

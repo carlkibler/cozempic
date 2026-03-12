@@ -276,3 +276,25 @@ def save_messages(
                 f.write(json.dumps(msg, separators=(",", ":")) + "\n")
 
     return backup_path
+
+
+def cleanup_old_backups(session_path: Path, keep: int = 3) -> int:
+    """Delete old timestamped .jsonl.bak files for this session, keeping the newest `keep`.
+
+    Prevents disk fill when the guard fires many prune cycles (#19).
+    Returns the number of files deleted.
+    """
+    pattern = f"{session_path.stem}.*.jsonl.bak"
+    bak_files = sorted(
+        session_path.parent.glob(pattern),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    deleted = 0
+    for old in bak_files[keep:]:
+        try:
+            old.unlink()
+            deleted += 1
+        except OSError:
+            pass
+    return deleted

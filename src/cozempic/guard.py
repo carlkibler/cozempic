@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import platform
+import signal
 import subprocess
 import sys
 import time
@@ -26,7 +27,8 @@ from pathlib import Path
 from .executor import run_prescription
 from .helpers import is_ssh_session, shell_quote
 from .registry import PRESCRIPTIONS
-from .session import find_claude_pid, find_current_session, find_sessions, load_messages, save_messages
+import cozempic.strategies  # noqa: F401 — register strategies so guard_prune_cycle can actually prune (#15)
+from .session import cleanup_old_backups, find_claude_pid, find_current_session, find_sessions, load_messages, save_messages
 from .team import TeamState, extract_team_state, inject_team_recovery, write_team_checkpoint
 from .tokens import default_token_thresholds, quick_token_estimate
 
@@ -266,6 +268,7 @@ def start_guard(
     soft_prune_count = 0
     checkpoint_count = 0
     last_team_hash = ""
+    consecutive_empty_hard_prunes = 0
 
     try:
         while True:
@@ -349,6 +352,20 @@ def start_guard(
                         f"  Team '{result['team_name']}' state preserved "
                         f"({result['team_messages']} messages)"
                     )
+
+                # Circuit breaker: if hard prune keeps freeing nothing, warn and back off
+                if result.get("saved_mb", 0) <= 0:
+                    consecutive_empty_hard_prunes += 1
+                    if consecutive_empty_hard_prunes >= 3:
+                        print(
+                            f"  [{_now()}] WARNING: Hard prune freed 0 bytes 3x in a row. "
+                            f"'{rx_name}' prescription may not match this session's content."
+                        )
+                        print(f"  Try: cozempic treat current -rx aggressive --execute")
+                        consecutive_empty_hard_prunes = 0
+                        time.sleep(interval * 4)
+                else:
+                    consecutive_empty_hard_prunes = 0
                 print()
 
             # ── Phase 2: SOFT prune at soft threshold ─────────────────
@@ -426,6 +443,20 @@ def guard_prune_cycle(
     final_bytes = sum(b for _, _, b in pruned_messages)
     saved_bytes = original_bytes - final_bytes
 
+    # If pruning freed nothing (or grew the file via team recovery injection), don't
+    # save — avoids backup accumulation and file growth on ineffective prescriptions (#16, #19).
+    if saved_bytes <= 0:
+        return {
+            "saved_mb": 0.0,
+            "original_tokens": pre_te.total,
+            "final_tokens": pre_te.total,
+            "team_name": team_state.team_name,
+            "team_messages": team_state.message_count,
+            "checkpoint_path": None,
+            "backup_path": None,
+            "reloading": False,
+        }
+
     # Token estimate after pruning
     post_te = estimate_session_tokens(pruned_messages)
 
@@ -437,6 +468,10 @@ def guard_prune_cycle(
 
     # Save pruned session
     backup = save_messages(session_path, pruned_messages, create_backup=True)
+
+    # Cap backup retention at 3 files to prevent disk fill (#19)
+    if backup:
+        cleanup_old_backups(session_path, keep=3)
 
     result = {
         "saved_mb": saved_bytes / 1024 / 1024,
@@ -514,10 +549,16 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
 
 def _pid_file(cwd: str) -> Path:
     """Return the PID file path for a guard daemon in this project."""
-    # Use a hash of the cwd so each project gets its own PID file
     import hashlib
     slug = hashlib.md5(cwd.encode()).hexdigest()[:12]
     return Path("/tmp") / f"cozempic_guard_{slug}.pid"
+
+
+def _session_file(cwd: str) -> Path:
+    """Return the session file path that records which session the guard is watching."""
+    import hashlib
+    slug = hashlib.md5(cwd.encode()).hexdigest()[:12]
+    return Path("/tmp") / f"cozempic_guard_{slug}_session.txt"
 
 
 def _is_guard_running(cwd: str) -> int | None:
@@ -537,6 +578,7 @@ def _is_guard_running(cwd: str) -> int | None:
     except (ValueError, ProcessLookupError, PermissionError):
         # Stale PID file — clean it up
         pid_path.unlink(missing_ok=True)
+        _session_file(cwd).unlink(missing_ok=True)
         return None
 
 
@@ -564,13 +606,31 @@ def start_guard_daemon(
 
     existing_pid = _is_guard_running(cwd)
     if existing_pid:
-        return {
-            "started": False,
-            "pid": existing_pid,
-            "pid_file": str(_pid_file(cwd)),
-            "log_file": None,
-            "already_running": True,
-        }
+        # Check whether the existing guard is watching the same session (#11)
+        sess_path = _session_file(cwd)
+        old_session = sess_path.read_text().strip() if sess_path.exists() else None
+
+        if session_id is not None and old_session != session_id:
+            # Session changed — kill the stale guard and start a new one
+            print(
+                f"  Replacing guard (session changed: "
+                f"{old_session[:8] if old_session else '?'} → {session_id[:8]})"
+            )
+            try:
+                os.kill(existing_pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            time.sleep(1)
+            _pid_file(cwd).unlink(missing_ok=True)
+            sess_path.unlink(missing_ok=True)
+        else:
+            return {
+                "started": False,
+                "pid": existing_pid,
+                "pid_file": str(_pid_file(cwd)),
+                "log_file": None,
+                "already_running": True,
+            }
 
     import hashlib
     slug = hashlib.md5(cwd.encode()).hexdigest()[:12]
@@ -606,6 +666,9 @@ def start_guard_daemon(
         lf.write(f"CMD: {' '.join(cmd_parts)}\n\n")
         lf.flush()
 
+        # PYTHONUNBUFFERED=1 ensures guard log output is written immediately (#14)
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
             cmd_parts,
             stdout=lf,
@@ -613,10 +676,13 @@ def start_guard_daemon(
             stdin=subprocess.DEVNULL,
             start_new_session=True,
             cwd=cwd,
+            env=env,
         )
 
-    # Write PID file
+    # Write PID file and session file so stale guards can be detected on restart (#11)
     pid_path.write_text(str(proc.pid))
+    if session_id is not None:
+        _session_file(cwd).write_text(session_id)
 
     return {
         "started": True,
