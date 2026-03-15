@@ -275,6 +275,15 @@ def start_guard(
         )
         watcher_thread.start()
 
+    # Graceful shutdown on SIGTERM
+    def _graceful_shutdown(signum, frame):
+        print(f"\n  [{_now()}] Signal {signum} received — final checkpoint...")
+        checkpoint_team(session_path=session_path, quiet=False)
+        if overflow_watcher:
+            overflow_watcher.stop()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+
     # Claude process watchdog — detect exit even if Stop hook doesn't fire (#29767)
     claude_pid = find_claude_pid()
     claude_alive = True
@@ -282,12 +291,18 @@ def start_guard(
     prune_count = 0
     soft_prune_count = 0
     checkpoint_count = 0
+    cycle_count = 0
     last_team_hash = ""
     consecutive_empty_hard_prunes = 0
 
     try:
         while True:
             time.sleep(interval)
+            cycle_count += 1
+
+            # Periodic backup cleanup every 10 cycles (~5min)
+            if cycle_count % 10 == 0:
+                cleanup_old_backups(session_path, keep=3)
 
             # Re-check file exists
             if not session_path.exists():
