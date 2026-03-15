@@ -44,10 +44,25 @@ def get_system_overhead_tokens() -> int:
 def default_token_thresholds(context_window: int = DEFAULT_CONTEXT_WINDOW) -> tuple[int, int]:
     """Compute default hard and soft token thresholds from context window.
 
+    Hard threshold is always 75%. Soft threshold scales with context size:
+    - 200K context: 45% (conservative, triggers gentle prune early)
+    - 1M context: 55% (less aggressive, avoids unnecessary prune cycles)
+
     Returns (hard_threshold, soft_threshold) in tokens.
     """
     hard = int(context_window * DEFAULT_HARD_TOKEN_PCT)
-    soft = int(context_window * DEFAULT_SOFT_TOKEN_PCT)
+    # Scale soft threshold: larger context windows can tolerate higher fill
+    # before gentle pruning is needed. Linear interpolation between 45%–55%.
+    if context_window <= 200_000:
+        soft_pct = DEFAULT_SOFT_TOKEN_PCT  # 0.45
+    elif context_window >= 1_000_000:
+        soft_pct = 0.55
+    else:
+        # Linear interpolation for intermediate sizes
+        soft_pct = DEFAULT_SOFT_TOKEN_PCT + (0.55 - DEFAULT_SOFT_TOKEN_PCT) * (
+            (context_window - 200_000) / (1_000_000 - 200_000)
+        )
+    soft = int(context_window * soft_pct)
     return hard, soft
 
 # Model → context window mapping
@@ -345,15 +360,20 @@ def estimate_session_tokens(messages: list[Message]) -> TokenEstimate:
     )
 
 
-def quick_token_estimate(path: Path) -> int | None:
+def quick_token_estimate(path: Path, context_window: int = DEFAULT_CONTEXT_WINDOW) -> int | None:
     """Fast token estimate by reading only the tail of a JSONL file.
 
-    Reads the last 50KB and tries to extract usage from the last assistant
-    message. Returns the token total, or None if no usage data found.
+    Reads the tail and tries to extract usage from the last assistant
+    message. Tail buffer scales with context window: 50KB for 200K,
+    100KB for 1M (larger sessions have more tool results before the
+    last assistant message).
+
+    Returns the token total, or None if no usage data found.
     """
     try:
         file_size = path.stat().st_size
-        read_size = min(file_size, 50 * 1024)
+        tail_kb = 100 if context_window >= 1_000_000 else 50
+        read_size = min(file_size, tail_kb * 1024)
 
         with open(path, "rb") as f:
             if file_size > read_size:
