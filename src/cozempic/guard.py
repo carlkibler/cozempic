@@ -33,8 +33,12 @@ from .team import TeamState, extract_team_state, inject_team_recovery, write_tea
 from .tokens import default_token_thresholds, quick_token_estimate
 
 
-def _resolve_session_by_id(session_id: str) -> dict | None:
-    """Find a session by explicit ID, UUID prefix, or path."""
+def _resolve_session_by_id(session_id: str, max_retries: int = 5, retry_delay: float = 1.0) -> dict | None:
+    """Find a session by explicit ID, UUID prefix, or path.
+
+    Retries up to max_retries times to handle the race condition where the
+    SessionStart hook fires before Claude Code creates the JSONL file (#21).
+    """
     p = Path(session_id)
     if p.exists() and p.suffix == ".jsonl":
         return {
@@ -44,9 +48,12 @@ def _resolve_session_by_id(session_id: str) -> dict | None:
             "project": p.parent.name,
         }
 
-    for sess in find_sessions():
-        if sess["session_id"] == session_id or sess["session_id"].startswith(session_id):
-            return sess
+    for attempt in range(max_retries):
+        for sess in find_sessions():
+            if sess["session_id"] == session_id or sess["session_id"].startswith(session_id):
+                return sess
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
     return None
 
 
@@ -141,6 +148,13 @@ def prune_with_team_protect(
             team_messages.append(msg_tuple)
         else:
             non_team_messages.append(msg_tuple)
+
+    # If the entire session is team context (no non-team messages to prune),
+    # fall back to pruning all messages without team-protect (#21). This happens
+    # when a long team session grows large with no "free" content to remove.
+    if not non_team_messages:
+        new_messages, results = run_prescription(messages, strategy_names, config)
+        return new_messages, results, team_state
 
     # 3. Prune only non-team messages
     pruned_non_team, results = run_prescription(non_team_messages, strategy_names, config)

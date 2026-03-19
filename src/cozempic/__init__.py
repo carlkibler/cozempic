@@ -1,3 +1,3 @@
 """Cozempic - Context weight-loss tool for Claude Code."""
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
