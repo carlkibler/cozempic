@@ -214,7 +214,7 @@ class TestDetectModel1M(unittest.TestCase):
 
 
 class TestDefaultTokenThresholds1M(unittest.TestCase):
-    """Test that token thresholds scale correctly with 1M context."""
+    """Test that token thresholds scale correctly with context window size."""
 
     def test_200k_thresholds(self):
         from cozempic.tokens import default_token_thresholds
@@ -226,7 +226,7 @@ class TestDefaultTokenThresholds1M(unittest.TestCase):
         from cozempic.tokens import default_token_thresholds
         hard, soft = default_token_thresholds(1_000_000)
         self.assertEqual(hard, 750_000)   # 75% of 1M
-        self.assertEqual(soft, 450_000)   # 45% of 1M
+        self.assertEqual(soft, 550_000)   # 55% of 1M (scaled up from 45%)
 
 
 if __name__ == "__main__":
