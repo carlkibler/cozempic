@@ -332,8 +332,12 @@ def estimate_session_tokens(messages: list[Message]) -> TokenEstimate:
             context_window=context_window,
         )
 
-    # Fall back to heuristic
-    total, _ = estimate_tokens_heuristic(messages)
+    # Fall back to heuristic — use calibrated ratio if available
+    ratio = calibrate_ratio(messages)
+    if ratio is not None:
+        total, _ = estimate_tokens_heuristic(messages, chars_per_token=ratio)
+    else:
+        total, _ = estimate_tokens_heuristic(messages)
     pct = round(total / context_window * 100, 1)
     return TokenEstimate(
         total=total,
