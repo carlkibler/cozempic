@@ -643,6 +643,28 @@ def my_strategy(messages: list[Message], config: dict) -> StrategyResult:
     )
 ```
 
+## Known Limitations
+
+### Extended thinking content is invisible
+
+Claude's extended thinking blocks appear in session JSONL with empty content (`"thinking": ""`). The actual thinking content is processed server-side and not stored in the session file. Cozempic can trim thinking block signatures but cannot access or prune the thinking content itself.
+
+### System overhead varies by setup
+
+The default system overhead estimate (21K tokens) is calibrated for standard setups. Heavy configurations (many MCP servers, large CLAUDE.md, 10+ rules files) can use 35–50K tokens of overhead. Override with:
+
+```bash
+export COZEMPIC_SYSTEM_OVERHEAD_TOKENS=40000
+```
+
+### 1M context window support
+
+Cozempic auto-detects 1M context windows via model ID or the `--context-window` flag. Token thresholds scale automatically. If auto-detection doesn't work, override manually:
+
+```bash
+export COZEMPIC_CONTEXT_WINDOW=1000000
+```
+
 ## License
 
 MIT - see [LICENSE](LICENSE).
