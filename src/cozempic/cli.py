@@ -18,7 +18,7 @@ from .recap import save_recap
 from .registry import PRESCRIPTIONS, STRATEGIES
 from .helpers import is_ssh_session, shell_quote
 from .session import find_claude_pid, find_current_session, find_sessions, load_messages, project_slug_to_path, resolve_session, save_messages
-from .tokens import estimate_session_tokens, quick_token_estimate
+from .tokens import estimate_session_tokens, quick_token_estimate, calibrate_ratio
 from .types import PrescriptionResult, StrategyResult
 
 # Ensure all strategies are registered
@@ -253,15 +253,17 @@ def cmd_treat(args):
     original_bytes = sum(b for _, _, b in messages)
     original_count = len(messages)
 
-    # Token estimate before pruning
+    # Token estimate before pruning — also capture calibrated ratio before metadata-strip
     pre_te = estimate_session_tokens(messages)
+    pre_ratio = calibrate_ratio(messages)
 
     new_messages, strategy_results = run_prescription(messages, strategy_names, config)
     final_bytes = sum(b for _, _, b in new_messages)
     final_count = len(new_messages)
 
-    # Token estimate after pruning
-    post_te = estimate_session_tokens(new_messages)
+    # Token estimate after pruning — pass pre-calibrated ratio so metadata-strip
+    # doesn't corrupt the post-treatment count by falling back to raw default
+    post_te = estimate_session_tokens(new_messages, pre_calibrated_ratio=pre_ratio)
 
     pr = PrescriptionResult(
         prescription_name=rx_name,
@@ -366,15 +368,16 @@ def cmd_reload(args):
     original_bytes = sum(b for _, _, b in messages)
     original_count = len(messages)
 
-    # Token estimate before pruning
+    # Token estimate before pruning — capture calibrated ratio before metadata-strip
     pre_te = estimate_session_tokens(messages)
+    pre_ratio = calibrate_ratio(messages)
 
     new_messages, strategy_results = run_prescription(messages, strategy_names, config)
     final_bytes = sum(b for _, _, b in new_messages)
     final_count = len(new_messages)
 
-    # Token estimate after pruning
-    post_te = estimate_session_tokens(new_messages)
+    # Token estimate after pruning — pass pre-calibrated ratio
+    post_te = estimate_session_tokens(new_messages, pre_calibrated_ratio=pre_ratio)
 
     pr = PrescriptionResult(
         prescription_name=rx_name,
@@ -691,7 +694,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 1.2.5")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.2.6")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")

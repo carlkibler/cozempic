@@ -319,8 +319,18 @@ def estimate_tokens_heuristic(
     return total_tokens, token_breakdown
 
 
-def estimate_session_tokens(messages: list[Message]) -> TokenEstimate:
+def estimate_session_tokens(
+    messages: list[Message],
+    pre_calibrated_ratio: float | None = None,
+) -> TokenEstimate:
     """Estimate session tokens, preferring exact data over heuristic.
+
+    Args:
+        messages: session messages to estimate
+        pre_calibrated_ratio: chars-per-token ratio calibrated from a prior
+            version of the same session (e.g. before metadata-strip removed
+            usage fields). When provided, this is used instead of trying to
+            re-calibrate from messages that no longer have usage data.
 
     Returns a TokenEstimate namedtuple:
       total: estimated total tokens
@@ -347,8 +357,9 @@ def estimate_session_tokens(messages: list[Message]) -> TokenEstimate:
             context_window=context_window,
         )
 
-    # Fall back to heuristic — use calibrated ratio if available
-    ratio = calibrate_ratio(messages)
+    # Fall back to heuristic — prefer pre-calibrated ratio (survives metadata-strip),
+    # then try to calibrate from current messages, then use bare default.
+    ratio = pre_calibrated_ratio or calibrate_ratio(messages)
     if ratio is not None:
         total, _ = estimate_tokens_heuristic(messages, chars_per_token=ratio)
     else:

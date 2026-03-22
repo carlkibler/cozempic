@@ -22,6 +22,7 @@ PRESCRIPTIONS: dict[str, list[str]] = {
         "tool-output-trim",
         "stale-reads",
         "system-reminder-dedup",
+        "tool-use-result-strip",
     ],
     "aggressive": [
         "progress-collapse",
@@ -31,6 +32,7 @@ PRESCRIPTIONS: dict[str, list[str]] = {
         "tool-output-trim",
         "stale-reads",
         "system-reminder-dedup",
+        "tool-use-result-strip",
         "http-spam",
         "error-retry-collapse",
         "background-poll-collapse",

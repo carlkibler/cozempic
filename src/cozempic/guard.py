@@ -484,13 +484,14 @@ def guard_prune_cycle(
 
     Returns dict with: saved_mb, team_name, team_messages, reloading, checkpoint_path
     """
-    from .tokens import estimate_session_tokens
+    from .tokens import estimate_session_tokens, calibrate_ratio
 
     messages = load_messages(session_path)
     original_bytes = sum(b for _, _, b in messages)
 
-    # Token estimate before pruning
+    # Token estimate before pruning — capture calibrated ratio before metadata-strip
     pre_te = estimate_session_tokens(messages)
+    pre_ratio = calibrate_ratio(messages)
 
     # Prune with team protection
     pruned_messages, results, team_state = prune_with_team_protect(
@@ -514,8 +515,8 @@ def guard_prune_cycle(
             "reloading": False,
         }
 
-    # Token estimate after pruning
-    post_te = estimate_session_tokens(pruned_messages)
+    # Token estimate after pruning — pass pre-calibrated ratio
+    post_te = estimate_session_tokens(pruned_messages, pre_calibrated_ratio=pre_ratio)
 
     # Write checkpoint if team exists
     checkpoint_path = None

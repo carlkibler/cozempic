@@ -446,3 +446,49 @@ def strategy_envelope_strip(messages: list[Message], config: dict) -> StrategyRe
         messages_replaced=replaced,
         summary=f"Stripped {', '.join(sorted(constant_fields))} from {replaced} messages",
     )
+
+
+@strategy("tool-use-result-strip", "Strip toolUseResult envelope field (Edit diffs, never sent to API)", "standard", "5-50%")
+def strategy_tool_use_result_strip(messages: list[Message], config: dict) -> StrategyResult:
+    """Remove the toolUseResult top-level field from all messages.
+
+    Claude Code stores full Edit diffs (oldString, newString, structuredPatch) in a
+    top-level envelope field called toolUseResult. This field is purely internal UI
+    metadata — it is never included in message.content and never sent to the Claude API.
+    Stripping it has zero effect on what Claude sees but can recover 5-50% of session size
+    in edit-heavy sessions (avg ~6.5KB per Edit operation).
+    """
+    actions: list[PruneAction] = []
+    total_orig = sum(b for _, _, b in messages)
+    total_pruned = 0
+    replaced = 0
+
+    for idx, msg, size in messages:
+        if "toolUseResult" not in msg:
+            continue
+        new_msg = copy.deepcopy(msg)
+        del new_msg["toolUseResult"]
+        new_size = msg_bytes(new_msg)
+        saved = size - new_size
+        if saved > 0:
+            actions.append(PruneAction(
+                line_index=idx,
+                action="replace",
+                reason="strip toolUseResult (internal Edit diff, not in API payload)",
+                original_bytes=size,
+                pruned_bytes=new_size,
+                replacement=new_msg,
+            ))
+            total_pruned += saved
+            replaced += 1
+
+    return StrategyResult(
+        strategy_name="tool-use-result-strip",
+        actions=actions,
+        original_bytes=total_orig,
+        pruned_bytes=total_pruned,
+        messages_affected=replaced,
+        messages_removed=0,
+        messages_replaced=replaced,
+        summary=f"Stripped toolUseResult from {replaced} messages",
+    )
