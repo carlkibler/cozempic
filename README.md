@@ -1,8 +1,8 @@
 # Cozempic
 
-[![PyPI Downloads](https://img.shields.io/pypi/dm/cozempic?label=downloads&color=brightgreen)](https://pypi.org/project/cozempic/) [![PyPI Version](https://img.shields.io/pypi/v/cozempic)](https://pypi.org/project/cozempic/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Downloads](https://img.shields.io/badge/downloads-11k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.2.1-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**11,000+ downloads** · Context cleaning for [Claude Code](https://claude.ai/code) — **remove the bloat, keep everything that matters, protect Agent Teams from context loss**.
+Context cleaning for [Claude Code](https://claude.ai/code) — **remove the bloat, keep everything that matters, protect Agent Teams from context loss**.
 
 ### What gets removed
 
