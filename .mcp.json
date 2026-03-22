@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "cozempic": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--with", "fastmcp",
+        "--with", "cozempic",
+        "python",
+        "./plugin/servers/cozempic_mcp.py"
+      ]
+    }
+  }
+}
