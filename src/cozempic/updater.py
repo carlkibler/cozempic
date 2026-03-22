@@ -14,8 +14,10 @@ from . import __version__
 
 _PYPI_URL = "https://pypi.org/pypi/cozempic/json"
 _COUNTER_URL = "https://api.counterapi.dev/v1/cozempic/auto-updates/up"
+_INSTALL_COUNTER_URL = "https://api.counterapi.dev/v1/cozempic/installs/up"
 _CHECK_INTERVAL = 86400  # 24 hours
 _CACHE_FILE = Path.home() / ".cozempic_update_check"
+_INSTALL_SENTINEL = Path.home() / ".cozempic_installed"
 
 
 def _version_tuple(v: str) -> tuple[int, ...]:
@@ -64,6 +66,17 @@ def _do_upgrade(latest: str) -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+def ping_install_if_new() -> None:
+    """Ping the install counter once on first ever run. Silent no-op after that."""
+    if _INSTALL_SENTINEL.exists():
+        return
+    try:
+        _INSTALL_SENTINEL.write_text(__version__)
+        urlopen(Request(_INSTALL_COUNTER_URL, headers={"User-Agent": f"cozempic/{__version__}"}), timeout=3)
+    except Exception:
+        pass
 
 
 def maybe_auto_update() -> None:

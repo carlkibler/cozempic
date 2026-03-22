@@ -31,6 +31,12 @@ if (!alreadyInstalled) {
     console.log("\ncozempic could not be auto-installed. Run manually:\n  pip install cozempic\n");
     process.exit(0);
   }
+
+  // Ping install counter on first install
+  try {
+    const https = require("https");
+    https.get("https://api.counterapi.dev/v1/cozempic/installs/up", { headers: { "User-Agent": "cozempic-npm" } }, () => {}).on("error", () => {});
+  } catch {}
 }
 
 // ── 2. Wire global SessionStart hook in ~/.claude/settings.json ──────────────
