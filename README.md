@@ -26,6 +26,10 @@ Cozempic prevents this with five layers of protection:
 
 ## Changelog
 
+### v1.2.1
+
+- **Auto-update** — cozempic checks PyPI once per day on startup. If a newer version is available, it upgrades itself in-place and prints the result. No-ops silently on network failures, in piped/CI contexts, or when already up-to-date.
+
 ### v1.2.0
 
 - **Atomic file writes** — all session writes use `write → fsync → os.replace()`. No partial writes on crash, interrupt, or full disk.
