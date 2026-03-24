@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -9,8 +10,132 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from .types import Message
+
+
+# ─── Concurrent-write safety primitives ──────────────────────────────────────
+
+class PruneConflictError(Exception):
+    """The session file's original bytes changed during pruning.
+
+    Raised by save_messages() when a snapshot is provided and the file's
+    prefix was mutated (re-written or truncated) between snapshot time and
+    replace time.  The caller should discard the pruned output and retry
+    from a fresh load on the next cycle.
+    """
+
+
+class PruneLockError(Exception):
+    """The prune lock is held by another process or guard cycle."""
+
+
+class _FileSnapshot:
+    """Immutable point-in-time identity of a JSONL file.
+
+    Captures inode, size, and an MD5 of the full content so that save_messages()
+    can classify what happened to the file while pruning was in progress:
+
+    - "unchanged"  — byte-for-byte identical; safe to replace normally.
+    - "appended"   — file grew; all original bytes are intact as prefix.
+                     Delta lines can be appended to the pruned output.
+    - "conflict"   — inode changed, file shrank, or prefix was mutated.
+                     Caller must abort and retry.
+    """
+    __slots__ = ("inode", "size", "content_hash")
+
+    def __init__(self, path: Path) -> None:
+        st = path.stat()
+        self.inode: int = st.st_ino
+        self.size: int = st.st_size
+        self.content_hash: str = hashlib.md5(path.read_bytes()).hexdigest()
+
+    def classify(self, path: Path) -> Literal["unchanged", "appended", "conflict"]:
+        """Classify what happened to the file since this snapshot was taken."""
+        try:
+            st = path.stat()
+        except OSError:
+            return "conflict"
+        if st.st_ino != self.inode:
+            return "conflict"
+        if st.st_size == self.size:
+            return "unchanged"
+        if st.st_size > self.size:
+            data = path.read_bytes()
+            if hashlib.md5(data[: self.size]).hexdigest() == self.content_hash:
+                return "appended"
+        return "conflict"
+
+    def read_delta(self, path: Path) -> bytes:
+        """Return bytes appended since snapshot. Caller must verify 'appended' first."""
+        return path.read_bytes()[self.size :]
+
+
+def snapshot_session(path: Path) -> _FileSnapshot:
+    """Snapshot a session file's identity before loading, for append-safe writes."""
+    return _FileSnapshot(path)
+
+
+def _parse_delta_lines(delta: bytes) -> list[str]:
+    """Parse appended bytes into validated JSONL lines.
+
+    Raises ValueError if the delta does not end on a newline boundary (Claude
+    mid-write) or json.JSONDecodeError if any line is not valid JSON.
+    Returns a list of raw JSON line strings (no trailing newline per element).
+    """
+    text = delta.decode("utf-8", errors="replace")
+    if not text.endswith("\n"):
+        raise ValueError("delta does not end on newline boundary — Claude may be mid-write")
+    lines = []
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        json.loads(raw)  # validates; raises json.JSONDecodeError if corrupt
+        lines.append(raw)
+    return lines
+
+
+class _PruneLock:
+    """Advisory lock preventing concurrent prune cycles on the same session file.
+
+    Uses fcntl.LOCK_EX|LOCK_NB on a companion .prune-lock file so two guard
+    instances (or a guard + a manual `cozempic treat --execute`) cannot race
+    each other.  Falls back silently to a no-op on platforms without fcntl
+    (Windows).
+    """
+
+    def __init__(self, session_path: Path) -> None:
+        self._lock_path = session_path.with_suffix(".prune-lock")
+        self._fh = None
+
+    def __enter__(self) -> "_PruneLock":
+        try:
+            import fcntl
+            self._fh = open(self._lock_path, "w", encoding="utf-8")
+            fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except ImportError:
+            self._fh = None  # Windows — skip locking
+        except OSError as exc:
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+            raise PruneLockError(
+                f"Another prune cycle is active for {self._lock_path.name}"
+            ) from exc
+        return self
+
+    def __exit__(self, *_) -> None:
+        if self._fh is not None:
+            try:
+                import fcntl
+                fcntl.flock(self._fh, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            self._fh.close()
+            self._fh = None
+        self._lock_path.unlink(missing_ok=True)
 
 
 def get_claude_dir() -> Path:
@@ -254,6 +379,97 @@ def resolve_session(
     sys.exit(1)
 
 
+# ─── Session sidecar store ────────────────────────────────────────────────────
+#
+# Maps session_id → {cwd, context_window, created_at, last_seen_at}.
+# Populated by the guard daemon at startup and refreshed on each checkpoint.
+# Consumers (reload, guard resume) prefer this over slug reversal, which is
+# ambiguous for paths containing hyphens.
+
+_SIDECAR_FILENAME = "cozempic-sessions.json"
+_SIDECAR_MAX_ENTRIES = 200
+
+
+def get_sidecar_path() -> Path:
+    """Return the path to the session sidecar store."""
+    return get_claude_dir() / _SIDECAR_FILENAME
+
+
+def _load_sidecar() -> dict:
+    """Load the sidecar store. Returns {} on missing or corrupt file."""
+    p = get_sidecar_path()
+    try:
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_sidecar(data: dict) -> None:
+    """Atomically write the sidecar store."""
+    p = get_sidecar_path()
+    tmp = p.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def record_session(
+    session_id: str,
+    cwd: str,
+    context_window: int | None = None,
+) -> None:
+    """Record or refresh a session's cwd and context window in the sidecar store.
+
+    Called from the guard daemon at startup and on each checkpoint so the map
+    stays current across long-running sessions. Capped at _SIDECAR_MAX_ENTRIES
+    (oldest last_seen_at evicted first) to prevent unbounded growth.
+    """
+    if not session_id or not cwd:
+        return
+    data = _load_sidecar()
+    existing = data.get(session_id, {})
+    now = datetime.now().isoformat(timespec="seconds")
+    data[session_id] = {
+        "cwd": cwd,
+        "context_window": (
+            context_window if context_window is not None
+            else existing.get("context_window")
+        ),
+        "created_at": existing.get("created_at", now),
+        "last_seen_at": now,
+    }
+    if len(data) > _SIDECAR_MAX_ENTRIES:
+        by_age = sorted(data, key=lambda k: data[k].get("last_seen_at", ""), reverse=True)
+        data = {k: data[k] for k in by_age[:_SIDECAR_MAX_ENTRIES]}
+    _save_sidecar(data)
+
+
+def get_session_cwd(session_id: str) -> str | None:
+    """Return the recorded cwd for a session from the sidecar store, or None."""
+    if not session_id:
+        return None
+    rec = _load_sidecar().get(session_id)
+    return rec.get("cwd") if rec else None
+
+
+def get_session_context_window(session_id: str) -> int | None:
+    """Return the recorded context window for a session from the sidecar, or None."""
+    if not session_id:
+        return None
+    rec = _load_sidecar().get(session_id)
+    return rec.get("context_window") if rec else None
+
+
+# ─── JSONL I/O ────────────────────────────────────────────────────────────────
+
 MAX_LINE_BYTES = 10 * 1024 * 1024  # 10MB per-line safety limit
 
 
@@ -280,17 +496,23 @@ def save_messages(
     path: Path,
     messages: list[Message],
     create_backup: bool = True,
+    snapshot: _FileSnapshot | None = None,
 ) -> Path | None:
     """Save messages back to JSONL, optionally creating a timestamped backup.
 
+    When *snapshot* is provided (taken via snapshot_session() before load_messages()),
+    the file is classified before replacing:
+
+    - "unchanged"  — safe to replace; proceeds normally.
+    - "appended"   — Claude wrote new lines while pruning was in progress; the
+                     delta is validated and appended to the pruned output so no
+                     messages are lost.
+    - "conflict"   — prefix was mutated (rewrite or truncation); raises
+                     PruneConflictError.  The backup is NOT created and the
+                     original file is left untouched.
+
     Returns the backup path if created, else None.
     """
-    backup_path = None
-    if create_backup:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = path.with_suffix(f".{ts}.jsonl.bak")
-        shutil.copy2(path, backup_path)
-
     tmp_path = path.with_suffix(".tmp")
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -301,6 +523,41 @@ def save_messages(
                     f.write(json.dumps(msg, separators=(",", ":")) + "\n")
             f.flush()
             os.fsync(f.fileno())
+
+        # ── Append-aware conflict detection ──────────────────────────────────
+        if snapshot is not None:
+            state = snapshot.classify(path)
+            if state == "conflict":
+                tmp_path.unlink(missing_ok=True)
+                raise PruneConflictError(
+                    f"Session file was modified (prefix changed) while pruning: {path}"
+                )
+            if state == "appended":
+                delta = snapshot.read_delta(path)
+                try:
+                    extra_lines = _parse_delta_lines(delta)
+                except (ValueError, json.JSONDecodeError) as exc:
+                    # Claude is mid-write — treat as conflict; retry next cycle.
+                    tmp_path.unlink(missing_ok=True)
+                    raise PruneConflictError(
+                        f"Session file has an incomplete append — deferring prune: {path}"
+                    ) from exc
+                if extra_lines:
+                    with open(tmp_path, "a", encoding="utf-8") as fa:
+                        for line in extra_lines:
+                            fa.write(line + "\n")
+                        fa.flush()
+                        os.fsync(fa.fileno())
+        # ─────────────────────────────────────────────────────────────────────
+
+        # Backup is created after conflict check so orphaned backups are not
+        # left behind when a conflict causes an early return.
+        backup_path: Path | None = None
+        if create_backup:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = path.with_suffix(f".{ts}.jsonl.bak")
+            shutil.copy2(path, backup_path)
+
         os.replace(tmp_path, path)
     except Exception:
         tmp_path.unlink(missing_ok=True)

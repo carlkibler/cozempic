@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -84,7 +85,11 @@ def maybe_auto_update() -> None:
 
     Throttled to one check per 24 hours. No-ops silently on network failures.
     Only runs when stdout is a TTY (not in piped/CI contexts).
+
+    Set COZEMPIC_NO_AUTO_UPDATE=1 to disable all automatic upgrade behaviour.
     """
+    if os.environ.get("COZEMPIC_NO_AUTO_UPDATE"):
+        return
     if not sys.stdout.isatty():
         return
     if not _should_check():

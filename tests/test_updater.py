@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import unittest
@@ -49,6 +50,14 @@ class TestShouldCheck(unittest.TestCase):
 
 
 class TestMaybeAutoUpdate(unittest.TestCase):
+    def test_skips_when_env_var_set(self):
+        """COZEMPIC_NO_AUTO_UPDATE=1 disables all update activity."""
+        with patch.dict(os.environ, {"COZEMPIC_NO_AUTO_UPDATE": "1"}):
+            with patch("cozempic.updater._should_check") as mock_check:
+                from cozempic.updater import maybe_auto_update
+                maybe_auto_update()
+                mock_check.assert_not_called()
+
     def test_skips_when_not_tty(self):
         """No update check when stdout is not a TTY (piped/CI)."""
         with patch("sys.stdout") as mock_stdout:

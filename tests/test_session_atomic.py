@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from cozempic.session import load_messages, save_messages
+from cozempic.session import (
+    PruneConflictError,
+    PruneLockError,
+    _PruneLock,
+    load_messages,
+    save_messages,
+    snapshot_session,
+)
 
 
 def _make_messages(path: Path, n: int = 5) -> list:
@@ -116,3 +123,132 @@ class TestAtomicWrite:
         messages = _make_messages(jsonl)
         backup = save_messages(jsonl, messages, create_backup=False)
         assert backup is None
+
+
+class TestSnapshotAndAppend:
+    def test_unchanged_snapshot_saves_normally(self, tmp_path):
+        """Snapshot with no changes in between → unchanged → normal save."""
+        jsonl = tmp_path / "sess.jsonl"
+        messages = _make_messages(jsonl)
+        snap = snapshot_session(jsonl)
+        backup = save_messages(jsonl, messages, create_backup=False, snapshot=snap)
+        assert backup is None
+        reloaded = load_messages(jsonl)
+        assert len(reloaded) == len(messages)
+
+    def test_appended_lines_preserved(self, tmp_path):
+        """Lines Claude appends mid-prune survive in the output."""
+        jsonl = tmp_path / "sess.jsonl"
+        messages = _make_messages(jsonl, n=5)
+        snap = snapshot_session(jsonl)
+
+        # Simulate Claude appending a new line after snapshot
+        extra = json.dumps({"message": {"role": "assistant", "content": "new reply"}}) + "\n"
+        with open(jsonl, "a", encoding="utf-8") as f:
+            f.write(extra)
+
+        save_messages(jsonl, messages, create_backup=False, snapshot=snap)
+
+        reloaded = load_messages(jsonl)
+        # Pruned 5 lines + 1 appended delta = 6 total
+        assert len(reloaded) == 6
+        contents = [m["message"]["content"] for _, m, _ in reloaded]
+        assert "new reply" in contents
+
+    def test_conflict_raises_and_leaves_file_intact(self, tmp_path):
+        """If the prefix was rewritten mid-prune, PruneConflictError is raised."""
+        jsonl = tmp_path / "sess.jsonl"
+        messages = _make_messages(jsonl, n=5)
+        snap = snapshot_session(jsonl)
+
+        # Simulate a full rewrite (inode change via os.replace)
+        import os
+        new_content = json.dumps({"message": {"role": "user", "content": "rewritten"}}) + "\n"
+        tmp = jsonl.with_suffix(".conflict_tmp")
+        tmp.write_text(new_content, encoding="utf-8")
+        os.replace(tmp, jsonl)
+
+        original_text = jsonl.read_text(encoding="utf-8")
+        with pytest.raises(PruneConflictError):
+            save_messages(jsonl, messages, create_backup=False, snapshot=snap)
+
+        # File must be unchanged from the rewrite
+        assert jsonl.read_text(encoding="utf-8") == original_text
+        # No orphaned .tmp left behind
+        assert not jsonl.with_suffix(".tmp").exists()
+
+    def test_no_orphan_backup_on_conflict(self, tmp_path):
+        """Backup is NOT created when a conflict aborts the prune."""
+        jsonl = tmp_path / "sess.jsonl"
+        messages = _make_messages(jsonl, n=3)
+        snap = snapshot_session(jsonl)
+
+        import os
+        tmp = jsonl.with_suffix(".ct")
+        tmp.write_text(json.dumps({"rewritten": True}) + "\n", encoding="utf-8")
+        os.replace(tmp, jsonl)
+
+        with pytest.raises(PruneConflictError):
+            save_messages(jsonl, messages, create_backup=True, snapshot=snap)
+
+        bak_files = list(jsonl.parent.glob("*.bak"))
+        assert bak_files == [], "no backup should be created on conflict"
+
+    def test_incomplete_append_raises_conflict(self, tmp_path):
+        """A delta that doesn't end with newline (mid-write) raises PruneConflictError."""
+        jsonl = tmp_path / "sess.jsonl"
+        messages = _make_messages(jsonl, n=3)
+        snap = snapshot_session(jsonl)
+
+        # Append bytes that don't end with newline — Claude mid-write
+        with open(jsonl, "ab") as f:
+            f.write(b'{"message":{"role":"user","content":"partial"')  # no closing brace or newline
+
+        with pytest.raises(PruneConflictError):
+            save_messages(jsonl, messages, create_backup=False, snapshot=snap)
+
+
+class TestPruneLock:
+    def test_lock_acquired_and_released(self, tmp_path):
+        """Lock file is created on enter and removed on exit."""
+        jsonl = tmp_path / "sess.jsonl"
+        jsonl.write_text("{}\n", encoding="utf-8")
+        lock_path = jsonl.with_suffix(".prune-lock")
+
+        with _PruneLock(jsonl):
+            assert lock_path.exists()
+
+        assert not lock_path.exists()
+
+    def test_second_lock_raises(self, tmp_path):
+        """A second lock on the same file raises PruneLockError."""
+        jsonl = tmp_path / "sess.jsonl"
+        jsonl.write_text("{}\n", encoding="utf-8")
+
+        with _PruneLock(jsonl):
+            with pytest.raises(PruneLockError):
+                with _PruneLock(jsonl):
+                    pass  # should not reach here
+
+    def test_lock_released_after_exception(self, tmp_path):
+        """Lock file is cleaned up even when body raises."""
+        jsonl = tmp_path / "sess.jsonl"
+        jsonl.write_text("{}\n", encoding="utf-8")
+        lock_path = jsonl.with_suffix(".prune-lock")
+
+        with pytest.raises(RuntimeError):
+            with _PruneLock(jsonl):
+                raise RuntimeError("body error")
+
+        assert not lock_path.exists()
+
+    def test_second_lock_succeeds_after_first_released(self, tmp_path):
+        """After the first lock is released, a second acquisition succeeds."""
+        jsonl = tmp_path / "sess.jsonl"
+        jsonl.write_text("{}\n", encoding="utf-8")
+
+        with _PruneLock(jsonl):
+            pass
+        # Should not raise
+        with _PruneLock(jsonl):
+            pass

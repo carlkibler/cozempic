@@ -28,7 +28,18 @@ from .executor import run_prescription
 from .helpers import is_ssh_session, shell_quote
 from .registry import PRESCRIPTIONS
 import cozempic.strategies  # noqa: F401 — register strategies so guard_prune_cycle can actually prune (#15)
-from .session import cleanup_old_backups, find_claude_pid, find_current_session, find_sessions, load_messages, save_messages
+from .session import (
+    PruneConflictError,
+    PruneLockError,
+    _PruneLock,
+    cleanup_old_backups,
+    find_claude_pid,
+    find_current_session,
+    find_sessions,
+    load_messages,
+    save_messages,
+    snapshot_session,
+)
 from .team import TeamState, extract_team_state, inject_team_recovery, write_team_checkpoint
 from .tokens import default_token_thresholds, quick_token_estimate
 
@@ -251,6 +262,11 @@ def start_guard(
         threshold_tokens, soft_threshold_tokens = default_token_thresholds(context_window)
     elif soft_threshold_tokens is None:
         soft_threshold_tokens = int(threshold_tokens * 0.6)
+
+    # Persist cwd + context_window to the sidecar so reload and guard resume
+    # can resolve the project directory without relying on slug reversal.
+    from .session import record_session
+    record_session(sess["session_id"], cwd or os.getcwd(), context_window)
 
     # Format context window for display
     if context_window >= 1_000_000:
@@ -482,54 +498,82 @@ def guard_prune_cycle(
 ) -> dict:
     """Execute a single guard prune cycle.
 
+    Holds a _PruneLock for the duration so concurrent guard instances cannot
+    race each other.  Takes a _FileSnapshot before loading so that any lines
+    Claude appends while pruning is in progress are preserved in the output
+    (or the cycle is deferred on conflict).
+
     Returns dict with: saved_mb, team_name, team_messages, reloading, checkpoint_path
     """
     from .tokens import estimate_session_tokens, calibrate_ratio
 
-    messages = load_messages(session_path)
-    original_bytes = sum(b for _, _, b in messages)
+    _no_change = {
+        "saved_mb": 0.0,
+        "original_tokens": 0,
+        "final_tokens": 0,
+        "team_name": None,
+        "team_messages": 0,
+        "checkpoint_path": None,
+        "backup_path": None,
+        "reloading": False,
+    }
 
-    # Token estimate before pruning — capture calibrated ratio before metadata-strip
-    pre_te = estimate_session_tokens(messages)
-    pre_ratio = calibrate_ratio(messages)
+    try:
+        with _PruneLock(session_path):
+            # Snapshot before load so we can detect Claude appending mid-prune
+            snap = snapshot_session(session_path)
 
-    # Prune with team protection
-    pruned_messages, results, team_state = prune_with_team_protect(
-        messages, rx_name=rx_name, config=config,
-    )
+            messages = load_messages(session_path)
+            original_bytes = sum(b for _, _, b in messages)
 
-    final_bytes = sum(b for _, _, b in pruned_messages)
-    saved_bytes = original_bytes - final_bytes
+            # Token estimate before pruning — capture calibrated ratio before metadata-strip
+            pre_te = estimate_session_tokens(messages)
+            pre_ratio = calibrate_ratio(messages)
 
-    # If pruning freed nothing (or grew the file via team recovery injection), don't
-    # save — avoids backup accumulation and file growth on ineffective prescriptions (#16, #19).
-    if saved_bytes <= 0:
-        return {
-            "saved_mb": 0.0,
-            "original_tokens": pre_te.total,
-            "final_tokens": pre_te.total,
-            "team_name": team_state.team_name,
-            "team_messages": team_state.message_count,
-            "checkpoint_path": None,
-            "backup_path": None,
-            "reloading": False,
-        }
+            # Prune with team protection
+            pruned_messages, results, team_state = prune_with_team_protect(
+                messages, rx_name=rx_name, config=config,
+            )
 
-    # Token estimate after pruning — pass pre-calibrated ratio
-    post_te = estimate_session_tokens(pruned_messages, pre_calibrated_ratio=pre_ratio)
+            final_bytes = sum(b for _, _, b in pruned_messages)
+            saved_bytes = original_bytes - final_bytes
 
-    # Write checkpoint if team exists
-    checkpoint_path = None
-    if not team_state.is_empty():
-        project_dir = session_path.parent
-        checkpoint_path = write_team_checkpoint(team_state, project_dir)
+            # If pruning freed nothing (or grew the file via team recovery injection), don't
+            # save — avoids backup accumulation and file growth on ineffective prescriptions (#16, #19).
+            if saved_bytes <= 0:
+                return {
+                    "saved_mb": 0.0,
+                    "original_tokens": pre_te.total,
+                    "final_tokens": pre_te.total,
+                    "team_name": team_state.team_name,
+                    "team_messages": team_state.message_count,
+                    "checkpoint_path": None,
+                    "backup_path": None,
+                    "reloading": False,
+                }
 
-    # Save pruned session
-    backup = save_messages(session_path, pruned_messages, create_backup=True)
+            # Token estimate after pruning — pass pre-calibrated ratio
+            post_te = estimate_session_tokens(pruned_messages, pre_calibrated_ratio=pre_ratio)
 
-    # Cap backup retention at 3 files to prevent disk fill (#19)
-    if backup:
-        cleanup_old_backups(session_path, keep=3)
+            # Write checkpoint if team exists
+            checkpoint_path = None
+            if not team_state.is_empty():
+                project_dir = session_path.parent
+                checkpoint_path = write_team_checkpoint(team_state, project_dir)
+
+            # Save pruned session — snapshot enables append-aware atomic write
+            backup = save_messages(session_path, pruned_messages, create_backup=True, snapshot=snap)
+
+            # Cap backup retention at 3 files to prevent disk fill (#19)
+            if backup:
+                cleanup_old_backups(session_path, keep=3)
+
+    except PruneLockError as exc:
+        print(f"  [{_now()}] Prune deferred — lock held: {exc}", file=sys.stderr)
+        return _no_change
+    except PruneConflictError as exc:
+        print(f"  [{_now()}] Prune deferred — conflict detected: {exc}", file=sys.stderr)
+        return _no_change
 
     result = {
         "saved_mb": saved_bytes / 1024 / 1024,

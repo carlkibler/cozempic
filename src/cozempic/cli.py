@@ -17,7 +17,7 @@ from .init import run_init
 from .recap import save_recap
 from .registry import PRESCRIPTIONS, STRATEGIES
 from .helpers import is_ssh_session, shell_quote
-from .session import find_claude_pid, find_current_session, find_sessions, load_messages, project_slug_to_path, resolve_session, save_messages
+from .session import find_claude_pid, find_current_session, find_sessions, get_session_cwd, load_messages, project_slug_to_path, resolve_session, save_messages
 from .tokens import estimate_session_tokens, quick_token_estimate, calibrate_ratio
 from .types import PrescriptionResult, StrategyResult
 
@@ -347,10 +347,15 @@ def cmd_reload(args):
         print("Make sure you're running from a directory with a Claude Code project.", file=sys.stderr)
         sys.exit(1)
 
-    # Derive project directory from session slug (more reliable than CWD)
-    project_dir = project_slug_to_path(sess["project"])
-    if os.path.isdir(project_dir):
-        cwd = project_dir
+    # Prefer sidecar cwd (exact path, handles hyphens and special chars).
+    # Fall back to slug reversal for sessions predating the sidecar.
+    sidecar_cwd = get_session_cwd(sess["session_id"])
+    if sidecar_cwd and os.path.isdir(sidecar_cwd):
+        cwd = sidecar_cwd
+    else:
+        legacy = project_slug_to_path(sess["project"])
+        if os.path.isdir(legacy):
+            cwd = legacy
 
     rx_name = args.rx or "standard"
     if rx_name not in PRESCRIPTIONS:
@@ -694,7 +699,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 1.2.8")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.3.0")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")
