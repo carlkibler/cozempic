@@ -70,27 +70,37 @@ def _do_upgrade(latest: str) -> bool:
 
 
 def ping_install_if_new() -> None:
-    """Ping the install counter once on first ever run. Silent no-op after that."""
-    if _INSTALL_SENTINEL.exists():
-        return
+    """Ping the install counter once per installed version.
+
+    Re-pings when the version in the sentinel doesn't match the running version,
+    so existing users who had the sentinel before the counter was added get counted
+    on their next run after upgrading.
+    """
     try:
+        if _INSTALL_SENTINEL.exists():
+            if _INSTALL_SENTINEL.read_text().strip() == __version__:
+                return
         _INSTALL_SENTINEL.write_text(__version__)
         urlopen(Request(_INSTALL_COUNTER_URL, headers={"User-Agent": f"cozempic/{__version__}"}), timeout=3)
     except Exception:
         pass
 
 
-def maybe_auto_update() -> None:
+def maybe_auto_update(force: bool = False, silent: bool = False) -> None:
     """Check PyPI and auto-update cozempic if a newer version is available.
 
     Throttled to one check per 24 hours. No-ops silently on network failures.
-    Only runs when stdout is a TTY (not in piped/CI contexts).
+    Skips when stdout is not a TTY unless force=True (used by guard/MCP startup).
+
+    Args:
+        force: Bypass the TTY check (for guard daemon and MCP server startup).
+        silent: Suppress all output (required for MCP context where stdout is the protocol stream).
 
     Set COZEMPIC_NO_AUTO_UPDATE=1 to disable all automatic upgrade behaviour.
     """
     if os.environ.get("COZEMPIC_NO_AUTO_UPDATE"):
         return
-    if not sys.stdout.isatty():
+    if not force and not sys.stdout.isatty():
         return
     if not _should_check():
         return
@@ -103,13 +113,16 @@ def maybe_auto_update() -> None:
     if _version_tuple(latest) <= _version_tuple(__version__):
         return
 
-    print(f"  Updating cozempic {__version__} → {latest}...", flush=True)
+    if not silent:
+        print(f"  Updating cozempic {__version__} → {latest}...", flush=True)
     if _do_upgrade(latest):
         try:
             urlopen(Request(_COUNTER_URL, headers={"User-Agent": f"cozempic/{latest}"}), timeout=3)
         except Exception:
             pass
-        print(f"  Updated to v{latest}. ✨ Self-updating now, atomic writes, strict session guard, zero false positives on team detection.", flush=True)
-        print(f"  Restart cozempic to use the new version.", flush=True)
+        if not silent:
+            print(f"  Updated to v{latest}.", flush=True)
+            print(f"  Restart cozempic to use the new version.", flush=True)
     else:
-        print(f"  Auto-update failed. Run: pip install --upgrade cozempic", flush=True)
+        if not silent:
+            print(f"  Auto-update failed. Run: pip install --upgrade cozempic", flush=True)

@@ -3,12 +3,31 @@
 
 from __future__ import annotations
 
+import threading
+
 from fastmcp import FastMCP
 
 # Ensure all strategies are registered
 import cozempic.strategies  # noqa: F401
 
 mcp = FastMCP("Cozempic")
+
+
+def _startup_maintenance() -> None:
+    """Ping install counter + check for updates at MCP server startup.
+
+    Runs in a background thread so it never blocks tool calls.
+    MCP users don't have a TTY so force=True bypasses the isatty() guard.
+    """
+    try:
+        from cozempic.updater import maybe_auto_update, ping_install_if_new
+        ping_install_if_new()
+        maybe_auto_update(force=True, silent=True)
+    except Exception:
+        pass
+
+
+threading.Thread(target=_startup_maintenance, daemon=True, name="cozempic-startup").start()
 
 
 @mcp.tool()

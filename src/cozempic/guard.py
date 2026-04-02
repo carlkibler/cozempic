@@ -268,22 +268,32 @@ def start_guard(
     from .session import record_session
     record_session(sess["session_id"], cwd or os.getcwd(), context_window)
 
+    # Auto-update check — force=True so it works even when guard runs via hook (no TTY)
+    from .updater import maybe_auto_update, ping_install_if_new
+    ping_install_if_new()
+    maybe_auto_update(force=True)
+
     # Format context window for display
     if context_window >= 1_000_000:
         ctx_str = f"{context_window / 1_000_000:.1f}M"
     else:
         ctx_str = f"{context_window / 1_000:.0f}K"
 
-    # Compute threshold % of context window for display
+    # Compute threshold %s of context window for display
     if threshold_tokens is not None and context_window:
         threshold_pct = int(threshold_tokens / context_window * 100)
     else:
         threshold_pct = 50  # default
+    if soft_threshold_tokens is not None and context_window:
+        soft_threshold_pct = int(soft_threshold_tokens / context_window * 100)
+    else:
+        soft_threshold_pct = int(threshold_pct * 0.6)
 
     reload_str = "and reload with an optimized clean context" if auto_reload else "in place (no reload)"
     print(
         f"\n  Guard is protecting and optimizing context storage with the {rx_name} prescription. "
-        f"When the session crosses {threshold_pct}% context, it will auto-prune "
+        f"At {soft_threshold_pct}% context it will do a gentle prune (no reload). "
+        f"At {threshold_pct}% it will do a full prune "
         f"(clean up junk like progress bars while protecting agent team states — "
         f"TeamCreate, SendMessage, TaskCreate messages) {reload_str}.\n"
     )
