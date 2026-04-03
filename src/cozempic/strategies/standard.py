@@ -381,14 +381,23 @@ def strategy_tool_result_age(messages: list[Message], config: dict) -> StrategyR
     total_pruned = 0
     replaced = 0
 
-    # Count user turns to determine age (each user message = 1 turn)
-    total_turns = sum(1 for _, msg, _ in messages if get_msg_type(msg) == "user")
+    # Count actual user prompts (not tool_result wrappers which also have type="user")
+    def _is_user_prompt(msg: dict) -> bool:
+        if get_msg_type(msg) != "user":
+            return False
+        content = msg.get("message", {}).get("content", "")
+        # tool_result messages have list content with tool_result blocks
+        if isinstance(content, list):
+            return not any(b.get("type") == "tool_result" for b in content if isinstance(b, dict))
+        return isinstance(content, str)
 
-    # Build turn index: for each message position, how many turns ago is it?
+    total_turns = sum(1 for _, msg, _ in messages if _is_user_prompt(msg))
+
+    # Build turn index: for each message position, how many user prompts precede it?
     turn_count = 0
     msg_turn: list[int] = []
     for _, msg, _ in messages:
-        if get_msg_type(msg) == "user":
+        if _is_user_prompt(msg):
             turn_count += 1
         msg_turn.append(turn_count)
 
