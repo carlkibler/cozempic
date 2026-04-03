@@ -355,3 +355,193 @@ def strategy_system_reminder_dedup(messages: list[Message], config: dict) -> Str
         messages_replaced=replaced,
         summary=f"Deduped system-reminders in {replaced} messages ({len(seen_hashes)} unique)",
     )
+
+
+@strategy("tool-result-age", "Compact old tool results by age — minify mid-age, stub old", "standard", "10-40%")
+def strategy_tool_result_age(messages: list[Message], config: dict) -> StrategyResult:
+    """Three-tier age-based tool result compaction.
+
+    Tool results decay in value exponentially. A file read from 50 turns ago
+    is stale (the file has been edited since) and wastes tokens. Claude can
+    always re-read if needed.
+
+    Tiers (configurable via config):
+      Recent (0 to mid_age turns):  untouched
+      Mid-age (mid_age to old_age): minify JSON, strip diff context lines
+      Old (old_age+):               replace content with compact stub
+
+    Research: JetBrains validated observation masking on SWE-bench — matched
+    LLM summarization quality at zero compute cost.
+    """
+    mid_age = config.get("tool_result_mid_age", 15)
+    old_age = config.get("tool_result_old_age", 40)
+
+    actions: list[PruneAction] = []
+    total_orig = sum(b for _, _, b in messages)
+    total_pruned = 0
+    replaced = 0
+
+    # Count user turns to determine age (each user message = 1 turn)
+    total_turns = sum(1 for _, msg, _ in messages if get_msg_type(msg) == "user")
+
+    # Build turn index: for each message position, how many turns ago is it?
+    turn_count = 0
+    msg_turn: list[int] = []
+    for _, msg, _ in messages:
+        if get_msg_type(msg) == "user":
+            turn_count += 1
+        msg_turn.append(turn_count)
+
+    for pos, (idx, msg, size) in enumerate(messages):
+        if is_protected(msg):
+            continue
+
+        blocks = get_content_blocks(msg)
+        if not blocks:
+            continue
+
+        has_tool_result = any(b.get("type") == "tool_result" for b in blocks)
+        if not has_tool_result:
+            continue
+
+        turns_ago = total_turns - msg_turn[pos]
+
+        if turns_ago < mid_age:
+            continue  # Recent — keep verbatim
+
+        new_blocks = []
+        changed = False
+
+        for block in blocks:
+            if block.get("type") != "tool_result":
+                new_blocks.append(block)
+                continue
+
+            content = block.get("content", "")
+            if not isinstance(content, str) or len(content) < 200:
+                new_blocks.append(block)
+                continue
+
+            tool_use_id = block.get("tool_use_id", "")
+
+            if turns_ago >= old_age:
+                # OLD: replace with compact stub
+                stub = _build_stub(block, blocks, messages, pos)
+                new_blocks.append({**block, "content": stub})
+                changed = True
+            else:
+                # MID-AGE: minify content
+                compacted = _minify_tool_content(content)
+                if compacted != content:
+                    new_blocks.append({**block, "content": compacted})
+                    changed = True
+                else:
+                    new_blocks.append(block)
+
+        if changed:
+            new_msg = set_content_blocks(msg, new_blocks)
+            new_size = msg_bytes(new_msg)
+            saved = size - new_size
+            if saved > 0:
+                actions.append(PruneAction(
+                    line_index=idx,
+                    action="replace",
+                    reason=f"tool-result-age ({turns_ago} turns ago)",
+                    original_bytes=size,
+                    pruned_bytes=new_size,
+                    replacement=new_msg,
+                ))
+                total_pruned += saved
+                replaced += 1
+
+    return StrategyResult(
+        strategy_name="tool-result-age",
+        actions=actions,
+        original_bytes=total_orig,
+        pruned_bytes=total_pruned,
+        messages_affected=replaced,
+        messages_removed=0,
+        messages_replaced=replaced,
+        summary=f"Compacted {replaced} old tool results ({total_pruned / 1024:.0f}KB saved)",
+    )
+
+
+def _build_stub(block: dict, all_blocks: list[dict], messages: list[Message], pos: int) -> str:
+    """Build a compact stub for an old tool result."""
+    content = block.get("content", "")
+    tool_use_id = block.get("tool_use_id", "")
+    content_len = len(content)
+    line_count = content.count("\n") + 1 if content else 0
+
+    # Try to find the matching tool_use to get tool name and input
+    tool_name = ""
+    tool_path = ""
+    for search_pos in range(max(0, pos - 3), pos + 1):
+        if search_pos >= len(messages):
+            break
+        _, search_msg, _ = messages[search_pos]
+        for b in get_content_blocks(search_msg):
+            if b.get("type") == "tool_use" and b.get("id") == tool_use_id:
+                tool_name = b.get("name", "")
+                tool_input = b.get("input", {})
+                tool_path = (
+                    tool_input.get("file_path", "")
+                    or tool_input.get("path", "")
+                    or tool_input.get("pattern", "")
+                    or tool_input.get("command", "")[:80]
+                )
+                break
+
+    parts = ["[cozempic"]
+    if tool_name:
+        parts.append(f": {tool_name}")
+    if tool_path:
+        parts.append(f" {tool_path}")
+    parts.append(f" — {line_count} lines, {content_len / 1024:.1f}KB]")
+
+    return "".join(parts)
+
+
+def _minify_tool_content(content: str) -> str:
+    """Minify mid-age tool result content: strip JSON whitespace, collapse diff context."""
+    # Try JSON minification first
+    try:
+        parsed = json.loads(content)
+        minified = json.dumps(parsed, separators=(",", ":"))
+        if len(minified) < len(content) * 0.85:  # Only if meaningful savings
+            return minified
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Collapse diff context lines (lines starting with space in unified diff)
+    if content.startswith("diff ") or "\n@@" in content[:500]:
+        return _collapse_diff_context(content)
+
+    return content
+
+
+def _collapse_diff_context(diff_text: str) -> str:
+    """Strip unchanged context lines from unified diffs, keep +/- and headers."""
+    lines = diff_text.split("\n")
+    result = []
+    context_run = 0
+
+    for line in lines:
+        if line.startswith(("diff ", "---", "+++", "@@", "+", "-")):
+            if context_run > 0:
+                result.append(f"  [...{context_run} unchanged lines...]")
+                context_run = 0
+            result.append(line)
+        elif line.startswith(" "):
+            context_run += 1
+        else:
+            if context_run > 0:
+                result.append(f"  [...{context_run} unchanged lines...]")
+                context_run = 0
+            result.append(line)
+
+    if context_run > 0:
+        result.append(f"  [...{context_run} unchanged lines...]")
+
+    collapsed = "\n".join(result)
+    return collapsed if len(collapsed) < len(diff_text) else diff_text

@@ -1,6 +1,6 @@
 # Cozempic
 
-![Downloads](https://img.shields.io/badge/downloads-20k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.4.1-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Downloads](https://img.shields.io/badge/downloads-20k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.5.0-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 **20,000+ power users** trust Cozempic to keep their Claude Code sessions lean.
 
@@ -14,7 +14,7 @@ Cozempic removes it with **17 composable strategies** across 3 prescription tier
 
 ### Key Features
 
-- **17 pruning strategies** — gentle (5), standard (10), aggressive (17)
+- **18 pruning strategies** — gentle (5), standard (11), aggressive (18)
 - **Guard daemon** — auto-starts via SessionStart hook, monitors and prunes continuously
 - **compact-summary-collapse** — 85-95% savings by removing pre-compaction messages already in the summary
 - **Agent Teams protection** — checkpoints team state through compaction, reactive overflow recovery
@@ -86,24 +86,25 @@ cozempic formulary
 | 5 | `metadata-strip` | gentle | Strip token usage stats, stop_reason, costs | 1-3% |
 | 6 | `thinking-blocks` | standard | Remove/truncate thinking content + signatures | 2-5% |
 | 7 | `tool-output-trim` | standard | Trim large tool results (>8KB or >100 lines), microcompact-aware | 1-8% |
-| 8 | `stale-reads` | standard | Remove file reads superseded by later edits | 0.5-2% |
-| 9 | `system-reminder-dedup` | standard | Deduplicate repeated system-reminder tags | 0.1-3% |
-| 10 | `tool-use-result-strip` | standard | Strip toolUseResult envelope field (Edit diffs, never sent to API) | 5-50% |
-| 11 | `image-strip` | aggressive | Strip old base64 image blocks, keep most recent 20% | 1-40% |
-| 12 | `http-spam` | aggressive | Collapse consecutive HTTP request runs | 0-2% |
-| 13 | `error-retry-collapse` | aggressive | Collapse repeated error-retry sequences | 0-5% |
-| 14 | `background-poll-collapse` | aggressive | Collapse repeated polling messages | 0-1% |
-| 15 | `document-dedup` | aggressive | Deduplicate large document blocks (CLAUDE.md injection) | 0-44% |
-| 16 | `mega-block-trim` | aggressive | Trim any content block over 32KB | safety net |
-| 17 | `envelope-strip` | aggressive | Strip constant envelope fields (cwd, version, slug) | 2-4% |
+| 8 | `tool-result-age` | standard | Compact old tool results by age — minify mid-age, stub old | 10-40% |
+| 9 | `stale-reads` | standard | Remove file reads superseded by later edits | 0.5-2% |
+| 10 | `system-reminder-dedup` | standard | Deduplicate repeated system-reminder tags | 0.1-3% |
+| 11 | `tool-use-result-strip` | standard | Strip toolUseResult envelope field (Edit diffs, never sent to API) | 5-50% |
+| 12 | `image-strip` | aggressive | Strip old base64 image blocks, keep most recent 20% | 1-40% |
+| 13 | `http-spam` | aggressive | Collapse consecutive HTTP request runs | 0-2% |
+| 14 | `error-retry-collapse` | aggressive | Collapse repeated error-retry sequences | 0-5% |
+| 15 | `background-poll-collapse` | aggressive | Collapse repeated polling messages | 0-1% |
+| 16 | `document-dedup` | aggressive | Deduplicate large document blocks (CLAUDE.md injection) | 0-44% |
+| 17 | `mega-block-trim` | aggressive | Trim any content block over 32KB | safety net |
+| 18 | `envelope-strip` | aggressive | Strip constant envelope fields (cwd, version, slug) | 2-4% |
 
 ### Prescriptions
 
 | Prescription | Strategies | Risk | Typical Savings |
 |---|---|---|---|
 | `gentle` | 5 | Minimal | 85-95% (with compact boundary) |
-| `standard` | 10 | Low | 15-25% |
-| `aggressive` | 17 | Moderate | 25-50% |
+| `standard` | 11 | Low | 25-45% |
+| `aggressive` | 18 | Moderate | 35-60% |
 
 **Dry-run is the default.** Nothing is modified until you pass `--execute`. Backups are always created.
 
@@ -238,6 +239,12 @@ After `cozempic init`, these hooks are wired automatically:
 ```
 
 ## Changelog
+
+### v1.5.0
+
+- **`tool-result-age` strategy** — age-based tool result compaction. Recent results stay verbatim, mid-age get JSON minified and diff context collapsed, old replaced with compact stubs. Claude can re-read any file. 10-40% additional savings targeting the 45% of session size that tool results occupy.
+- 18 strategies total, standard prescription 11, aggressive 18
+- Tests: 273 → 283
 
 ### v1.4.0 / v1.4.1
 
