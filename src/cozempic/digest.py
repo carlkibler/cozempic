@@ -565,6 +565,167 @@ def update_digest(
     return added, upvoted, rejected
 
 
+# ---------------------------------------------------------------------------
+# Injection — Phase 2: inject rules at session tail
+# ---------------------------------------------------------------------------
+
+
+def _format_rule_4field(rule: DigestRule) -> str:
+    """Format a rule in 4-field compressed format (arXiv:2603.13017 — 11x compression)."""
+    line = f"[{rule.id}|{rule.scope}|{rule.priority}] {rule.rule}"
+    if rule.trigger:
+        line += f"\n  When: {rule.trigger}"
+    if rule.signal:
+        line += f"\n  Signal: {rule.signal}"
+    if rule.evidence:
+        line += f"\n  Evidence: \"{rule.evidence[:120]}\""
+    return line
+
+
+def build_injection_text(store: DigestStore) -> str | None:
+    """Build the injection text block from active rules.
+
+    Returns None if no active rules exist.
+    4-field structured format for injection (full 8-field stored on disk).
+    Prefix: "Focus solely on these behavioral rules when applicable" (arXiv:2505.02709).
+    Hard cap: 20 active rules (IFScale).
+    """
+    active = store.active_rules()
+    if not active:
+        return None
+
+    # Hard rules first, then soft, capped at MAX_ACTIVE_RULES
+    hard = [r for r in active if r.priority == "hard"]
+    soft = [r for r in active if r.priority == "soft"]
+    rules = (hard + soft)[:MAX_ACTIVE_RULES]
+
+    lines = [
+        "BEHAVIORAL CONTRACT — Focus solely on these rules when applicable.",
+        "",
+    ]
+
+    if hard:
+        lines.append("PROHIBITIONS:")
+        for r in hard:
+            lines.append(_format_rule_4field(r))
+        lines.append("")
+
+    soft_rules = [r for r in rules if r.priority == "soft"]
+    if soft_rules:
+        lines.append("PREFERENCES:")
+        for r in soft_rules:
+            lines.append(_format_rule_4field(r))
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def inject_digest_at_tail(
+    messages: list[Message],
+    store: DigestStore,
+    session_id: str = "",
+) -> list[Message]:
+    """Append digest as isVisibleInTranscriptOnly synthetic message at tail.
+
+    Design decisions (research-backed):
+    - Tail position: highest attention weight (Lost in the Middle U-curve)
+    - isVisibleInTranscriptOnly: shown in UI, never sent to API (zero token cost)
+    - Protection tag: never stripped by any strategy
+    """
+    text = build_injection_text(store)
+    if not text:
+        return messages
+
+    # Remove any existing digest injection (re-inject fresh)
+    cleaned = [
+        (idx, msg, size) for idx, msg, size in messages
+        if not msg.get(PROTECTION_TAG)
+    ]
+
+    # Build the injection message
+    injection_msg = {
+        "type": "user",
+        "isVisibleInTranscriptOnly": True,
+        PROTECTION_TAG: True,
+        "message": {
+            "role": "user",
+            "content": text,
+        },
+    }
+
+    from .helpers import msg_bytes
+    # Use max line index + 1 for the new entry
+    max_idx = max((idx for idx, _, _ in cleaned), default=-1)
+    cleaned.append((max_idx + 1, injection_msg, msg_bytes(injection_msg)))
+
+    # Update last_injection timestamp on injected rules
+    now = datetime.now(timezone.utc).isoformat()
+    for r in store.active_rules():
+        r.last_injection = now
+
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
+# PreCompact — instructions for compaction prompt survival
+# ---------------------------------------------------------------------------
+
+
+def precompact_instructions(store: DigestStore | None = None) -> str:
+    """Return instructions for Claude's compaction prompt.
+
+    Per CC source: PreCompact hook can return instructions: string that gets
+    injected into the compaction system prompt. Preserves behavioral facts
+    that would otherwise be lost in summarization.
+    """
+    if store is None:
+        store = load_digest_store()
+
+    active = [r for r in store.strategy_rules if r.status == "active" and r.priority == "hard"]
+    if not active:
+        return ""
+
+    rules = "\n".join(f"- {r.rule}" for r in active[:10])  # Top 10 hard rules only
+    return f"IMPORTANT — Behavioral rules that MUST be preserved in the summary:\n{rules}"
+
+
+# ---------------------------------------------------------------------------
+# Flush / Recover — compaction survival loop
+# ---------------------------------------------------------------------------
+
+
+def flush_digest(
+    messages: list[Message],
+    project_dir: str = "",
+    session_id: str = "",
+) -> tuple[int, int, int]:
+    """Extract corrections from full session and save to disk.
+
+    Called by PreCompact and Stop hooks to capture corrections before loss.
+    Returns (added, upvoted, rejected).
+    """
+    return update_digest(messages, since_turn=0, project_dir=project_dir, session_id=session_id)
+
+
+def recover_digest(
+    messages: list[Message],
+    project_dir: str = "",
+    session_id: str = "",
+) -> list[Message]:
+    """Re-inject digest at tail after compaction.
+
+    Called by PostCompact hook. Loads stored rules and appends at tail.
+    Returns the updated message list.
+    """
+    store = load_digest_store(project_dir)
+    if store.is_empty():
+        return messages
+
+    result = inject_digest_at_tail(messages, store, session_id)
+    save_digest_store(store)  # Update last_injection timestamps
+    return result
+
+
 def show_digest() -> str:
     """Return a formatted string of the current digest."""
     store = load_digest_store()

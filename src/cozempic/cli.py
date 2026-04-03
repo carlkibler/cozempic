@@ -692,9 +692,27 @@ def cmd_formulary(args):
     print()
 
 
+def _digest_session(args):
+    """Resolve session path and ID from args."""
+    from .session import find_current_session
+    cwd = getattr(args, "cwd", None) or os.getcwd()
+    session_path = getattr(args, "session", None)
+    if not session_path:
+        sess = find_current_session(cwd)
+        if not sess:
+            print("No active session found.")
+            sys.exit(1)
+        return sess["path"], sess.get("session_id", ""), cwd
+    return session_path, "", cwd
+
+
 def cmd_digest(args):
-    from .digest import clear_digest_store, show_digest, update_digest
-    from .session import find_current_session, load_messages
+    from .digest import (
+        clear_digest_store, flush_digest, inject_digest_at_tail,
+        load_digest_store, precompact_instructions, recover_digest,
+        save_digest_store, show_digest, update_digest,
+    )
+    from .session import load_messages, save_messages
 
     action = getattr(args, "digest_action", "show") or "show"
 
@@ -702,18 +720,7 @@ def cmd_digest(args):
         print(show_digest())
 
     elif action == "update":
-        cwd = getattr(args, "cwd", None) or os.getcwd()
-        session_path = getattr(args, "session", None)
-        if not session_path:
-            sess = find_current_session(cwd)
-            if not sess:
-                print("No active session found.")
-                sys.exit(1)
-            session_path = sess["path"]
-            session_id = sess.get("session_id", "")
-        else:
-            session_id = ""
-
+        session_path, session_id, cwd = _digest_session(args)
         messages = load_messages(session_path)
         added, upvoted, rejected = update_digest(
             messages, project_dir=cwd, session_id=session_id,
@@ -723,6 +730,36 @@ def cmd_digest(args):
     elif action == "clear":
         clear_digest_store()
         print("Behavioral digest cleared.")
+
+    elif action == "flush":
+        session_path, session_id, cwd = _digest_session(args)
+        messages = load_messages(session_path)
+        added, upvoted, rejected = flush_digest(
+            messages, project_dir=cwd, session_id=session_id,
+        )
+        # Output precompact instructions for hook consumption
+        instructions = precompact_instructions()
+        if instructions:
+            print(instructions)
+
+    elif action == "recover":
+        session_path, session_id, cwd = _digest_session(args)
+        messages = load_messages(session_path)
+        result = recover_digest(messages, project_dir=cwd, session_id=session_id)
+        save_messages(session_path, result, create_backup=False)
+        print("Digest re-injected at session tail.")
+
+    elif action == "inject":
+        session_path, session_id, cwd = _digest_session(args)
+        store = load_digest_store(cwd)
+        if store.is_empty():
+            print("No rules to inject.")
+            return
+        messages = load_messages(session_path)
+        result = inject_digest_at_tail(messages, store, session_id)
+        save_messages(session_path, result, create_backup=False)
+        save_digest_store(store)
+        print(f"Injected {len(store.active_rules())} active rules at session tail.")
 
 
 # ─── Parser ───────────────────────────────────────────────────────────────────
@@ -820,8 +857,8 @@ def build_parser() -> argparse.ArgumentParser:
     # digest
     p_digest = sub.add_parser("digest", help="Manage behavioral correction rules")
     p_digest.add_argument("digest_action", nargs="?", default="show",
-                          choices=["show", "update", "clear"],
-                          help="Action: show (default), update, clear")
+                          choices=["show", "update", "clear", "flush", "recover", "inject"],
+                          help="Action: show (default), update, clear, flush, recover, inject")
     p_digest.add_argument("--session", help="Session ID or path")
     p_digest.add_argument("--cwd", help="Working directory (default: current)")
 
