@@ -693,14 +693,17 @@ def _update_memory_index(mem_dir: Path) -> None:
     """Ensure cozempic_digest.md is referenced in MEMORY.md index."""
     index_path = mem_dir / "MEMORY.md"
     marker = "[Cozempic Behavioral Digest](cozempic_digest.md)"
+    entry = f"- {marker} — behavioral rules from user corrections"
 
     if index_path.exists():
         content = index_path.read_text(encoding="utf-8")
         if "cozempic_digest.md" in content:
             return  # Already referenced
-        # Append to existing index
-        content = content.rstrip() + f"\n- {marker} — behavioral rules from user corrections\n"
+        content = content.rstrip() + f"\n{entry}\n"
         index_path.write_text(content, encoding="utf-8")
+    else:
+        # MEMORY.md doesn't exist yet — don't create it, Claude Code manages this file
+        pass
 
 
 # ---------------------------------------------------------------------------

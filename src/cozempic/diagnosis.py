@@ -6,7 +6,7 @@ import json
 import re
 
 from .helpers import get_content_blocks, get_msg_type, text_of
-from .tokens import estimate_session_tokens
+from .tokens import estimate_session_tokens, extract_usage_tokens
 from .types import Message
 
 
@@ -64,6 +64,21 @@ def diagnose_session(messages: list[Message]) -> dict:
 
     token_estimate = estimate_session_tokens(messages)
 
+    # Cache efficiency metrics (#45)
+    usage = extract_usage_tokens(messages)
+    cache_stats = None
+    if usage:
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_create = usage.get("cache_creation_input_tokens", 0)
+        cache_total = cache_read + cache_create
+        cache_hit_rate = round(cache_read / cache_total * 100, 1) if cache_total > 0 else 0.0
+        cache_stats = {
+            "cache_read_tokens": cache_read,
+            "cache_creation_tokens": cache_create,
+            "cache_total_tokens": cache_total,
+            "cache_hit_rate": cache_hit_rate,
+        }
+
     return {
         "total_bytes": total_bytes,
         "total_messages": total_messages,
@@ -76,4 +91,5 @@ def diagnose_session(messages: list[Message]) -> dict:
         "file_history_count": file_history_count,
         "reminder_count": reminder_count,
         "token_estimate": token_estimate,
+        "cache_stats": cache_stats,
     }

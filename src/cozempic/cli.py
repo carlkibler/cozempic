@@ -86,6 +86,10 @@ def print_diagnosis(diag: dict, path: Path):
     print(f"    Thinking content:   {fmt_bytes(diag['thinking_bytes']):>10} ({fmt_pct(diag['thinking_bytes'], total)})")
     print(f"    Signatures:         {fmt_bytes(diag['signature_bytes']):>10} ({fmt_pct(diag['signature_bytes'], total)})")
     print(f"    Tool results:       {fmt_bytes(diag['tool_result_bytes']):>10} ({fmt_pct(diag['tool_result_bytes'], total)})")
+
+    cache = diag.get("cache_stats")
+    if cache:
+        print(f"    Cache hit rate:     {cache['cache_hit_rate']:>5}%  ({cache['cache_read_tokens']:,} read / {cache['cache_total_tokens']:,} total)")
     print()
 
     print("  Message Type Breakdown:")
@@ -766,7 +770,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 1.3.1")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.4.0")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")
