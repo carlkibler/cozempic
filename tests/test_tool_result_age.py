@@ -148,7 +148,7 @@ class TestToolResultAge(unittest.TestCase):
                         self.assertIn("-old line", block["content"])
 
     def test_small_results_skipped(self):
-        """Tool results under 200 chars should not be touched regardless of age."""
+        """Tool results under 100 chars should not be touched regardless of age."""
         messages = _build_session(num_turns=60, result_size=50)  # Small results
         sr = STRATEGIES["tool-result-age"].func(messages, {
             "tool_result_mid_age": 5,

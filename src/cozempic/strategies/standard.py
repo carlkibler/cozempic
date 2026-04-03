@@ -427,7 +427,7 @@ def strategy_tool_result_age(messages: list[Message], config: dict) -> StrategyR
                 continue
 
             content = block.get("content", "")
-            if not isinstance(content, str) or len(content) < 200:
+            if not isinstance(content, str) or len(content) < 100:
                 new_blocks.append(block)
                 continue
 
@@ -485,7 +485,7 @@ def _build_stub(block: dict, all_blocks: list[dict], messages: list[Message], po
     # Try to find the matching tool_use to get tool name and input
     tool_name = ""
     tool_path = ""
-    for search_pos in range(max(0, pos - 3), pos + 1):
+    for search_pos in range(max(0, pos - 10), pos + 1):
         if search_pos >= len(messages):
             break
         _, search_msg, _ = messages[search_pos]
@@ -522,9 +522,11 @@ def _minify_tool_content(content: str) -> str:
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # Collapse diff context lines (lines starting with space in unified diff)
-    if content.startswith("diff ") or "\n@@" in content[:500]:
-        return _collapse_diff_context(content)
+    # Collapse diff context lines — validate it's a real unified diff first
+    if (content.startswith("diff ") or "\n@@" in content[:500]) and "\0" not in content:
+        collapsed = _collapse_diff_context(content)
+        if collapsed != content:
+            return collapsed
 
     return content
 
