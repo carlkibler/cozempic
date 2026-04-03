@@ -708,8 +708,8 @@ def _digest_session(args):
 
 def cmd_digest(args):
     from .digest import (
-        clear_digest_store, flush_digest, inject_digest_at_tail,
-        load_digest_store, precompact_instructions, recover_digest,
+        clear_digest_store, flush_digest,
+        load_digest_store, recover_digest,
         save_digest_store, show_digest, update_digest,
     )
     from .session import load_messages, save_messages
@@ -737,10 +737,7 @@ def cmd_digest(args):
         added, upvoted, rejected = flush_digest(
             messages, project_dir=cwd, session_id=session_id,
         )
-        # Output precompact instructions for hook consumption
-        instructions = precompact_instructions()
-        if instructions:
-            print(instructions)
+        print(f"Digest flushed: {added} new, {upvoted} reinforced, {rejected} rejected.")
 
     elif action == "recover":
         cwd = getattr(args, "cwd", None) or os.getcwd()

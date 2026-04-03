@@ -1,4 +1,4 @@
-"""Tests for Track 4: digest injection, precompact instructions, flush/recover cycle, hooks."""
+"""Tests for Track 4: memdir sync, build_injection_text, flush/recover, hooks."""
 
 from __future__ import annotations
 
@@ -14,13 +14,12 @@ from cozempic.digest import (
     DigestStore,
     build_injection_text,
     flush_digest,
-    inject_digest_at_tail,
     load_digest_store,
-    precompact_instructions,
     recover_digest,
     save_digest_store,
+    sync_to_memdir,
 )
-from cozempic.helpers import is_protected, msg_bytes
+from cozempic.helpers import msg_bytes
 
 import cozempic.strategies  # noqa: F401
 
@@ -44,7 +43,6 @@ def make_assistant(line_idx: int, text: str = "ok") -> tuple[int, dict, int]:
 
 
 def _make_store_with_rules() -> DigestStore:
-    """Create a store with both active and pending rules."""
     store = DigestStore(project="/test")
     store.strategy_rules.append(DigestRule(
         id="R001", rule="Do not add Co-Authored-By to commits",
@@ -75,8 +73,7 @@ def _make_store_with_rules() -> DigestStore:
 class TestBuildInjectionText(unittest.TestCase):
 
     def test_returns_none_for_empty_store(self):
-        store = DigestStore()
-        self.assertIsNone(build_injection_text(store))
+        self.assertIsNone(build_injection_text(DigestStore()))
 
     def test_returns_none_for_only_pending(self):
         store = DigestStore()
@@ -86,12 +83,10 @@ class TestBuildInjectionText(unittest.TestCase):
     def test_formats_hard_and_soft_rules(self):
         store = _make_store_with_rules()
         text = build_injection_text(store)
-        self.assertIsNotNone(text)
         self.assertIn("BEHAVIORAL CONTRACT", text)
         self.assertIn("PROHIBITIONS:", text)
         self.assertIn("PREFERENCES:", text)
         self.assertIn("Co-Authored-By", text)
-        self.assertIn("Edit for existing files", text)
 
     def test_excludes_pending_rules(self):
         store = _make_store_with_rules()
@@ -101,117 +96,76 @@ class TestBuildInjectionText(unittest.TestCase):
     def test_hard_rules_first(self):
         store = _make_store_with_rules()
         text = build_injection_text(store)
-        prohibitions_pos = text.index("PROHIBITIONS:")
-        preferences_pos = text.index("PREFERENCES:")
-        self.assertLess(prohibitions_pos, preferences_pos)
+        self.assertLess(text.index("PROHIBITIONS:"), text.index("PREFERENCES:"))
 
 
 # ---------------------------------------------------------------------------
-# inject_digest_at_tail
+# sync_to_memdir
 # ---------------------------------------------------------------------------
 
-class TestInjectDigestAtTail(unittest.TestCase):
-
-    def test_injects_at_tail(self):
-        store = _make_store_with_rules()
-        messages = [make_user(0, "hello"), make_assistant(1, "hi")]
-        result = inject_digest_at_tail(messages, store)
-        self.assertEqual(len(result), 3)
-        # Last message should be the injection
-        last_msg = result[-1][1]
-        self.assertTrue(last_msg.get(PROTECTION_TAG))
-        self.assertTrue(last_msg.get("isVisibleInTranscriptOnly"))
-        self.assertIn("BEHAVIORAL CONTRACT", last_msg["message"]["content"])
-
-    def test_no_injection_for_empty_store(self):
-        store = DigestStore()
-        messages = [make_user(0)]
-        result = inject_digest_at_tail(messages, store)
-        self.assertEqual(len(result), 1)
-
-    def test_replaces_existing_injection(self):
-        """Re-injection should remove old digest message and add fresh one."""
-        store = _make_store_with_rules()
-        messages = [
-            make_user(0, "hello"),
-            make_message(1, {
-                "type": "user",
-                PROTECTION_TAG: True,
-                "isVisibleInTranscriptOnly": True,
-                "message": {"role": "user", "content": "old rules"},
-            }),
-            make_assistant(2, "response"),
-        ]
-        result = inject_digest_at_tail(messages, store)
-        # Old injection removed, new one at tail
-        digest_msgs = [m for _, m, _ in result if m.get(PROTECTION_TAG)]
-        self.assertEqual(len(digest_msgs), 1)
-        self.assertIn("BEHAVIORAL CONTRACT", digest_msgs[0]["message"]["content"])
-
-    def test_injected_message_is_protected(self):
-        store = _make_store_with_rules()
-        messages = [make_user(0)]
-        result = inject_digest_at_tail(messages, store)
-        last_msg = result[-1][1]
-        self.assertTrue(is_protected(last_msg))
-
-    def test_updates_last_injection_timestamp(self):
-        store = _make_store_with_rules()
-        self.assertIsNone(store.strategy_rules[0].last_injection)
-        inject_digest_at_tail([make_user(0)], store)
-        self.assertIsNotNone(store.strategy_rules[0].last_injection)
-
-
-# ---------------------------------------------------------------------------
-# precompact_instructions
-# ---------------------------------------------------------------------------
-
-class TestPrecompactInstructions(unittest.TestCase):
-
-    def test_returns_empty_for_no_rules(self):
-        store = DigestStore()
-        self.assertEqual(precompact_instructions(store), "")
-
-    def test_returns_empty_for_only_soft_rules(self):
-        store = DigestStore()
-        store.strategy_rules.append(DigestRule(
-            id="R001", rule="Use snake_case", priority="soft", status="active",
-        ))
-        self.assertEqual(precompact_instructions(store), "")
-
-    def test_returns_hard_rules(self):
-        store = _make_store_with_rules()
-        result = precompact_instructions(store)
-        self.assertIn("MUST be preserved", result)
-        self.assertIn("Co-Authored-By", result)
-
-    def test_caps_at_10_rules(self):
-        store = DigestStore()
-        for i in range(15):
-            store.strategy_rules.append(DigestRule(
-                id=f"R{i:03d}", rule=f"Hard rule number {i}",
-                priority="hard", status="active",
-            ))
-        result = precompact_instructions(store)
-        # Should have at most 10 "- " prefixed lines
-        rule_lines = [l for l in result.split("\n") if l.startswith("- ")]
-        self.assertLessEqual(len(rule_lines), 10)
-
-
-# ---------------------------------------------------------------------------
-# Flush / Recover cycle
-# ---------------------------------------------------------------------------
-
-class TestFlushRecoverCycle(unittest.TestCase):
+class TestSyncToMemdir(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp())
+        self.mem_dir = self.tmpdir / "memory"
+        self.mem_dir.mkdir()
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_flush_extracts_and_saves(self):
+    def test_writes_memory_file(self):
+        store = _make_store_with_rules()
+        with patch("cozempic.digest._get_memdir", return_value=self.mem_dir):
+            synced = sync_to_memdir(store)
+        self.assertEqual(synced, 2)  # 2 active rules
+        digest_mem = self.mem_dir / "cozempic_digest.md"
+        self.assertTrue(digest_mem.exists())
+        content = digest_mem.read_text()
+        self.assertIn("type: feedback", content)
+        self.assertIn("BEHAVIORAL CONTRACT", content)
+        self.assertIn("Co-Authored-By", content)
+
+    def test_removes_file_when_no_active_rules(self):
+        # Pre-create file
+        digest_mem = self.mem_dir / "cozempic_digest.md"
+        digest_mem.write_text("old content")
+        store = DigestStore()
+        with patch("cozempic.digest._get_memdir", return_value=self.mem_dir):
+            synced = sync_to_memdir(store)
+        self.assertEqual(synced, 0)
+        self.assertFalse(digest_mem.exists())
+
+    def test_returns_zero_when_no_memdir(self):
+        store = _make_store_with_rules()
+        with patch("cozempic.digest._get_memdir", return_value=None):
+            synced = sync_to_memdir(store)
+        self.assertEqual(synced, 0)
+
+    def test_updates_last_injection(self):
+        store = _make_store_with_rules()
+        self.assertIsNone(store.strategy_rules[0].last_injection)
+        with patch("cozempic.digest._get_memdir", return_value=self.mem_dir):
+            sync_to_memdir(store)
+        self.assertIsNotNone(store.strategy_rules[0].last_injection)
+
+
+# ---------------------------------------------------------------------------
+# Flush / Recover
+# ---------------------------------------------------------------------------
+
+class TestFlushRecover(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.mem_dir = self.tmpdir / "memory"
+        self.mem_dir.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_flush_extracts_and_syncs(self):
         messages = [
             make_assistant(0, "I'll add the Co-Authored-By"),
             make_user(1, "don't add Co-Authored-By"),
@@ -221,73 +175,61 @@ class TestFlushRecoverCycle(unittest.TestCase):
 
         with patch("cozempic.digest.DIGEST_DIR", self.tmpdir), \
              patch("cozempic.digest.DIGEST_FILE", digest_file), \
-             patch("cozempic.digest.DIGEST_MD_FILE", digest_md):
+             patch("cozempic.digest.DIGEST_MD_FILE", digest_md), \
+             patch("cozempic.digest._get_memdir", return_value=self.mem_dir):
             added, upvoted, rejected = flush_digest(messages, project_dir="/test")
             self.assertGreater(added, 0)
             self.assertTrue(digest_file.exists())
+            # Memdir should have been synced too
+            digest_mem = self.mem_dir / "cozempic_digest.md"
+            self.assertTrue(digest_mem.exists())
 
     def test_recover_syncs_to_memdir(self):
         digest_file = self.tmpdir / "behavioral-digest.json"
         digest_md = self.tmpdir / "behavioral-digest.md"
-        mem_dir = self.tmpdir / "memory"
-        mem_dir.mkdir()
 
         store = _make_store_with_rules()
         with patch("cozempic.digest.DIGEST_DIR", self.tmpdir), \
              patch("cozempic.digest.DIGEST_FILE", digest_file), \
              patch("cozempic.digest.DIGEST_MD_FILE", digest_md), \
-             patch("cozempic.digest._get_memdir", return_value=mem_dir):
+             patch("cozempic.digest._get_memdir", return_value=self.mem_dir):
             save_digest_store(store)
             synced = recover_digest(project_dir="/test")
             self.assertGreater(synced, 0)
-            # Memory file should exist
-            digest_mem = mem_dir / "cozempic_digest.md"
-            self.assertTrue(digest_mem.exists())
-            content = digest_mem.read_text()
-            self.assertIn("BEHAVIORAL CONTRACT", content)
+            content = (self.mem_dir / "cozempic_digest.md").read_text()
             self.assertIn("Co-Authored-By", content)
 
     def test_full_cycle(self):
-        """Simulate: session → flush (PreCompact) → compaction → recover via memdir."""
+        """flush → compaction (memdir survives) → recover re-syncs."""
         digest_file = self.tmpdir / "behavioral-digest.json"
         digest_md = self.tmpdir / "behavioral-digest.md"
-        mem_dir = self.tmpdir / "memory"
-        mem_dir.mkdir()
 
         with patch("cozempic.digest.DIGEST_DIR", self.tmpdir), \
              patch("cozempic.digest.DIGEST_FILE", digest_file), \
              patch("cozempic.digest.DIGEST_MD_FILE", digest_md), \
-             patch("cozempic.digest._get_memdir", return_value=mem_dir):
+             patch("cozempic.digest._get_memdir", return_value=self.mem_dir):
 
-            # Step 1: Session with corrections — flush extracts rules
-            pre_compact = [
+            # Flush: extract corrections
+            messages = [
                 make_assistant(0, "I'll add Co-Authored-By"),
                 make_user(1, "don't add Co-Authored-By"),
-                make_assistant(2, "sorry, I won't"),
-                make_user(3, "also always use Edit for existing files"),
             ]
-            flush_digest(pre_compact, project_dir="/test")
+            flush_digest(messages, project_dir="/test")
 
-            # Verify rules extracted — explicit corrections are now active immediately
+            # Verify active immediately (explicit correction)
             store = load_digest_store("/test")
-            self.assertGreater(len(store.strategy_rules), 0)
-            active = store.active_rules()
-            self.assertGreater(len(active), 0, "Explicit corrections should be active immediately")
+            self.assertGreater(len(store.active_rules()), 0)
 
-            # Step 2: Verify memdir file was created by flush
-            digest_mem = mem_dir / "cozempic_digest.md"
-            self.assertTrue(digest_mem.exists())
-            content = digest_mem.read_text()
-            self.assertIn("BEHAVIORAL CONTRACT", content)
+            # Verify memdir synced
+            self.assertTrue((self.mem_dir / "cozempic_digest.md").exists())
 
-            # Step 3: Compaction happens (memdir file survives on disk)
-            # Step 4: Recover just re-syncs — file already there
+            # Recover: re-sync (idempotent)
             synced = recover_digest(project_dir="/test")
             self.assertGreater(synced, 0)
 
 
 # ---------------------------------------------------------------------------
-# Hooks.json validation
+# Hooks.json
 # ---------------------------------------------------------------------------
 
 class TestHooksJson(unittest.TestCase):
@@ -297,12 +239,10 @@ class TestHooksJson(unittest.TestCase):
         if not hooks_path.exists():
             self.skipTest("hooks.json not found")
         data = json.loads(hooks_path.read_text())
-        self.assertIn("hooks", data)
         hooks = data["hooks"]
         self.assertIn("SessionStart", hooks)
         self.assertIn("PreCompact", hooks)
         self.assertIn("Stop", hooks)
-        # PostCompact removed — memdir survives compaction natively
 
     def test_digest_commands_in_hooks(self):
         hooks_path = Path(__file__).parent.parent / "plugin" / "hooks" / "hooks.json"

@@ -74,23 +74,22 @@ class DigestRule:
 
 @dataclass
 class DigestStore:
-    """Persistent store for behavioral rules — dual memory banks (MemAPO)."""
+    """Persistent store for behavioral rules."""
 
     strategy_rules: list[DigestRule] = field(default_factory=list)
-    failure_patterns: list[DigestRule] = field(default_factory=list)
     version: str = "1"
     project: str = ""
     updated: str = ""
     session_id: str = ""
 
     def is_empty(self) -> bool:
-        return not self.strategy_rules and not self.failure_patterns
+        return not self.strategy_rules
 
     def active_rules(self) -> list[DigestRule]:
         return [r for r in self.strategy_rules if r.status == "active"]
 
     def all_rules(self) -> list[DigestRule]:
-        return self.strategy_rules + self.failure_patterns
+        return self.strategy_rules
 
     def next_id(self) -> str:
         existing = {r.id for r in self.all_rules()}
@@ -458,8 +457,6 @@ def load_digest_store(project_dir: str = "") -> DigestStore:
         )
         for rd in data.get("strategy_rules", []):
             store.strategy_rules.append(DigestRule(**rd))
-        for rd in data.get("failure_patterns", []):
-            store.failure_patterns.append(DigestRule(**rd))
         return store
     except (json.JSONDecodeError, TypeError, KeyError):
         return DigestStore(project=project_dir)
@@ -476,7 +473,7 @@ def save_digest_store(store: DigestStore) -> None:
         "updated": store.updated,
         "session_id": store.session_id,
         "strategy_rules": [asdict(r) for r in store.strategy_rules],
-        "failure_patterns": [asdict(r) for r in store.failure_patterns],
+        "failure_patterns": [],  # Reserved for future use
     }
     DIGEST_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -513,13 +510,6 @@ def _write_digest_md(store: DigestStore) -> None:
         lines.append("")
         for r in pending:
             lines.append(f"- **[{r.id}|{r.scope}]** {r.rule} (seen {r.occurrence_count}x)")
-        lines.append("")
-
-    if store.failure_patterns:
-        lines.append(f"## Failure Patterns ({len(store.failure_patterns)})")
-        lines.append("")
-        for r in store.failure_patterns:
-            lines.append(f"- **[{r.id}]** {r.rule}")
         lines.append("")
 
     DIGEST_MD_FILE.write_text("\n".join(lines), encoding="utf-8")
@@ -713,69 +703,8 @@ def _update_memory_index(mem_dir: Path) -> None:
         index_path.write_text(content, encoding="utf-8")
 
 
-# Keep inject_digest_at_tail as fallback for non-memdir environments
-def inject_digest_at_tail(
-    messages: list[Message],
-    store: DigestStore,
-    session_id: str = "",
-) -> list[Message]:
-    """Fallback: inject rules into JSONL if memdir is unavailable.
-
-    Note: isVisibleInTranscriptOnly messages are NOT sent to Claude API.
-    This is a UI-only reference. Prefer sync_to_memdir() for actual injection.
-    """
-    text = build_injection_text(store)
-    if not text:
-        return messages
-
-    cleaned = [
-        (idx, msg, size) for idx, msg, size in messages
-        if not msg.get(PROTECTION_TAG)
-    ]
-
-    injection_msg = {
-        "type": "user",
-        "isVisibleInTranscriptOnly": True,
-        PROTECTION_TAG: True,
-        "message": {"role": "user", "content": text},
-    }
-
-    from .helpers import msg_bytes
-    max_idx = max((idx for idx, _, _ in cleaned), default=-1)
-    cleaned.append((max_idx + 1, injection_msg, msg_bytes(injection_msg)))
-
-    now = datetime.now(timezone.utc).isoformat()
-    for r in store.active_rules():
-        r.last_injection = now
-
-    return cleaned
-
-
 # ---------------------------------------------------------------------------
-# PreCompact — instructions for compaction prompt survival
-# ---------------------------------------------------------------------------
-
-
-def precompact_instructions(store: DigestStore | None = None) -> str:
-    """Return instructions for Claude's compaction prompt.
-
-    Per CC source: PreCompact hook can return instructions: string that gets
-    injected into the compaction system prompt. Preserves behavioral facts
-    that would otherwise be lost in summarization.
-    """
-    if store is None:
-        store = load_digest_store()
-
-    active = [r for r in store.strategy_rules if r.status == "active" and r.priority == "hard"]
-    if not active:
-        return ""
-
-    rules = "\n".join(f"- {r.rule}" for r in active[:10])  # Top 10 hard rules only
-    return f"IMPORTANT — Behavioral rules that MUST be preserved in the summary:\n{rules}"
-
-
-# ---------------------------------------------------------------------------
-# Flush / Recover — compaction survival loop
+# Flush / Recover — extraction + memdir sync
 # ---------------------------------------------------------------------------
 
 
@@ -838,10 +767,5 @@ def show_digest() -> str:
         lines.append(f"\nPending rules ({len(pending)}):")
         for r in pending:
             lines.append(f"  [{r.id}|{r.scope}] {r.rule} (seen {r.occurrence_count}x)")
-
-    if store.failure_patterns:
-        lines.append(f"\nFailure patterns ({len(store.failure_patterns)}):")
-        for r in store.failure_patterns:
-            lines.append(f"  [{r.id}] {r.rule}")
 
     return "\n".join(lines)
