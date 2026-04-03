@@ -425,8 +425,32 @@ def cmd_reload(args):
         return
 
     _spawn_watcher(claude_pid, cwd, recap_path=recap_path, session_id=sess["session_id"])
-    print(f"  Watcher spawned (watching Claude PID {claude_pid}).")
-    print(f"  Now type /exit — a new terminal will open with 'claude --resume'.")
+
+    # Auto-send /exit via the best available method
+    from .guard import _detect_terminal_env
+    term_env = _detect_terminal_env()
+
+    if term_env == "tmux":
+        pane = os.environ.get("TMUX_PANE", "")
+        import subprocess as sp
+        sp.run(["tmux", "send-keys", *(["-t", pane] if pane else []), "/exit", "Enter"],
+               capture_output=True, timeout=5)
+        print(f"  Sent /exit to tmux pane. Resuming automatically...")
+    elif term_env == "screen":
+        screen_session = os.environ.get("STY", "")
+        import subprocess as sp
+        sp.run(["screen", "-S", screen_session, "-X", "stuff", "/exit\n"],
+               capture_output=True, timeout=5)
+        print(f"  Sent /exit to screen session. Resuming automatically...")
+    elif term_env == "plain" and platform.system() == "Darwin":
+        import subprocess as sp
+        sp.run(["osascript", "-e",
+                'tell application "System Events" to keystroke "/exit" & return'],
+               capture_output=True, timeout=5)
+        print(f"  Sent /exit via keystrokes. Resuming automatically...")
+    else:
+        print(f"  Watcher spawned (watching Claude PID {claude_pid}).")
+        print(f"  Type /exit to trigger the resume.")
     print()
 
 
