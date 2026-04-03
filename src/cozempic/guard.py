@@ -670,9 +670,8 @@ def _terminate_and_resume(claude_pid: int, project_dir: str, session_id: str | N
 
     Priority:
       1. tmux/screen: send-keys "/exit" → wait → send-keys "claude --resume" (same pane)
-      2. macOS plain: SIGTERM → osascript keystrokes to frontmost terminal
-      3. Linux plain: SIGTERM → open new terminal with resume
-      4. SSH: skip terminate, print manual instructions
+      2. Plain terminal: SIGTERM → open new terminal with resume
+      3. SSH: skip terminate, print manual instructions
     """
     resume_flag = f"--resume {session_id}" if session_id else "--resume"
     resume_cmd = f"claude {resume_flag}"
@@ -769,11 +768,7 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
     system = platform.system()
 
     if system == "Darwin":
-        # Resume in the SAME terminal by typing the command into the frontmost window
-        # instead of opening a new one. Falls back to new window if keystroke fails.
         resume_cmd = (
-            f"osascript -e 'tell application \"System Events\" to keystroke "
-            f"\"cd {project_dir} && claude {resume_flag}\" & return' 2>/dev/null || "
             f"osascript -e 'tell application \"Terminal\" to do script "
             f"\"cd {shell_quote(project_dir)} && claude {resume_flag}\"'"
         )

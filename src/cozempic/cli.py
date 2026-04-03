@@ -435,12 +435,6 @@ def cmd_reload(args):
         sp.run(["screen", "-S", screen_session, "-X", "stuff", "/exit\n"],
                capture_output=True, timeout=5)
         print(f"  Resuming with optimized context...")
-    elif term_env == "plain" and platform.system() == "Darwin":
-        import subprocess as sp
-        sp.run(["osascript", "-e",
-                'tell application "System Events" to keystroke "/exit" & return'],
-               capture_output=True, timeout=5)
-        print(f"  Resuming with optimized context...")
     else:
         print(f"  Type /exit to resume with optimized context.")
     print()
