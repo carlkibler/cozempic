@@ -743,23 +743,23 @@ def cmd_digest(args):
             print(instructions)
 
     elif action == "recover":
-        session_path, session_id, cwd = _digest_session(args)
-        messages = load_messages(session_path)
-        result = recover_digest(messages, project_dir=cwd, session_id=session_id)
-        save_messages(session_path, result, create_backup=False)
-        print("Digest re-injected at session tail.")
+        cwd = getattr(args, "cwd", None) or os.getcwd()
+        synced = recover_digest(project_dir=cwd)
+        print(f"Synced {synced} rules to Claude Code memory.")
 
     elif action == "inject":
-        session_path, session_id, cwd = _digest_session(args)
+        cwd = getattr(args, "cwd", None) or os.getcwd()
         store = load_digest_store(cwd)
         if store.is_empty():
             print("No rules to inject.")
             return
-        messages = load_messages(session_path)
-        result = inject_digest_at_tail(messages, store, session_id)
-        save_messages(session_path, result, create_backup=False)
-        save_digest_store(store)
-        print(f"Injected {len(store.active_rules())} active rules at session tail.")
+        from .digest import sync_to_memdir
+        synced = sync_to_memdir(store, cwd=cwd)
+        if synced > 0:
+            save_digest_store(store)
+            print(f"Synced {synced} active rules to Claude Code memory.")
+        else:
+            print("Could not find Claude Code memory directory.")
 
 
 # ─── Parser ───────────────────────────────────────────────────────────────────

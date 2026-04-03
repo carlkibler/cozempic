@@ -32,7 +32,7 @@ DIGEST_MD_FILE = DIGEST_DIR / "behavioral-digest.md"
 MAX_ACTIVE_RULES = 20  # IFScale: >30 irrelevant rules degrades ALL adherence
 ADMISSION_THRESHOLD = 0.55  # A-MAC composite score gate
 PRUNE_THRESHOLD = 0.30  # Below this → prune
-PROMOTION_COUNT = 3  # Occurrences needed to promote pending → active
+PROMOTION_COUNT = 2  # Occurrences needed to promote pending → active (was 3, too high for real usage)
 DECAY_DAYS = 30  # Universal decay period (MemoryArena 2602.16313)
 
 # ---------------------------------------------------------------------------
@@ -110,9 +110,11 @@ _EXPLICIT_PATTERNS = [
     re.compile(r"^no[,.\s]", re.IGNORECASE),
     re.compile(r"\bdon'?t\b", re.IGNORECASE),
     re.compile(r"\bdo not\b", re.IGNORECASE),
-    re.compile(r"\bstop\s+(doing|adding|using|creating)", re.IGNORECASE),
+    re.compile(r"\bstop\s+\w+ing\b", re.IGNORECASE),  # "stop summarizing", "stop adding", etc.
     re.compile(r"\bnever\b", re.IGNORECASE),
     re.compile(r"\bplease\s+(don'?t|remove|stop|undo)", re.IGNORECASE),
+    re.compile(r"\bremove\s+that\b", re.IGNORECASE),
+    re.compile(r"\bundo\s+(that|this|the)\b", re.IGNORECASE),
 ]
 
 _IMPLICIT_PATTERNS = [
@@ -121,13 +123,16 @@ _IMPLICIT_PATTERNS = [
     re.compile(r"\brather\b", re.IGNORECASE),
     re.compile(r"\bthat'?s\s+(not|wrong)", re.IGNORECASE),
     re.compile(r"\bnot\s+what\s+I", re.IGNORECASE),
+    re.compile(r"\buse\s+\w+\s+not\s+\w+", re.IGNORECASE),  # "use Edit not Write"
+    re.compile(r"\bnot\s+\w+[,;]\s*(use|try)", re.IGNORECASE),  # "not Write, use Edit"
 ]
 
 _PREFERENCE_PATTERNS = [
     re.compile(r"\bI\s+prefer\b", re.IGNORECASE),
-    re.compile(r"\balways\s+(use|do|add|include)", re.IGNORECASE),
+    re.compile(r"\balways\s+(use|do|add|include|run|check)", re.IGNORECASE),
     re.compile(r"\bfrom\s+now\s+on\b", re.IGNORECASE),
     re.compile(r"\bremember\s+(to|that)\b", re.IGNORECASE),
+    re.compile(r"\bmake\s+sure\s+(to|you)\b", re.IGNORECASE),
 ]
 
 _APOLOGY_PATTERNS = [
@@ -331,7 +336,8 @@ def extract_corrections(
             importance=1,
             source_reliability=reliability_map.get(turn_class, 0.5),
             type_prior=type_prior_map.get(turn_class, 0.5),
-            status="pending",
+            # Explicit corrections are high-confidence — active immediately
+            status="active" if turn_class == "EXPLICIT_CORRECTION" else "pending",
             occurrence_count=1,
             first_seen=now,
             last_reinforced=now,
@@ -620,45 +626,124 @@ def build_injection_text(store: DigestStore) -> str | None:
     return "\n".join(lines)
 
 
+def _get_memdir(cwd: str = "") -> Path | None:
+    """Find the Claude Code memory directory for the given project."""
+    if not cwd:
+        import os
+        cwd = os.getcwd()
+    # Claude Code stores memories at ~/.claude/projects/<sanitized-cwd>/memory/
+    claude_dir = Path.home() / ".claude" / "projects"
+    if not claude_dir.exists():
+        return None
+    # Sanitize cwd the same way CC does: replace / with -
+    slug = cwd.lstrip("/").replace("/", "-")
+    project_dir = claude_dir / f"-{slug}"
+    if not project_dir.exists():
+        # Try finding by prefix match (CC may use different sanitization)
+        for d in claude_dir.iterdir():
+            if d.is_dir() and slug in d.name:
+                project_dir = d
+                break
+        else:
+            return None
+    mem_dir = project_dir / "memory"
+    return mem_dir if mem_dir.exists() else None
+
+
+def sync_to_memdir(store: DigestStore, cwd: str = "") -> int:
+    """Write active rules as Claude Code feedback memories.
+
+    Claude reads these natively via getMemoryFiles() → injected as <system-reminder>.
+    They survive compaction (files on disk, re-read after every compact).
+    No custom JSONL injection needed.
+
+    Returns number of rules synced.
+    """
+    mem_dir = _get_memdir(cwd)
+    if mem_dir is None:
+        return 0
+
+    active = store.active_rules()
+    if not active:
+        # Remove existing digest memory if no active rules
+        digest_mem = mem_dir / "cozempic_digest.md"
+        if digest_mem.exists():
+            digest_mem.unlink()
+        return 0
+
+    # Build the memory file content
+    text = build_injection_text(store)
+    if not text:
+        return 0
+
+    content = f"""---
+name: Cozempic Behavioral Digest
+description: Behavioral rules extracted from user corrections — follow these when applicable
+type: feedback
+---
+
+{text}
+"""
+
+    digest_mem = mem_dir / "cozempic_digest.md"
+    digest_mem.write_text(content, encoding="utf-8")
+
+    # Update MEMORY.md index if needed
+    _update_memory_index(mem_dir)
+
+    # Update last_injection timestamp
+    now = datetime.now(timezone.utc).isoformat()
+    for r in active:
+        r.last_injection = now
+
+    return len(active)
+
+
+def _update_memory_index(mem_dir: Path) -> None:
+    """Ensure cozempic_digest.md is referenced in MEMORY.md index."""
+    index_path = mem_dir / "MEMORY.md"
+    marker = "[Cozempic Behavioral Digest](cozempic_digest.md)"
+
+    if index_path.exists():
+        content = index_path.read_text(encoding="utf-8")
+        if "cozempic_digest.md" in content:
+            return  # Already referenced
+        # Append to existing index
+        content = content.rstrip() + f"\n- {marker} — behavioral rules from user corrections\n"
+        index_path.write_text(content, encoding="utf-8")
+
+
+# Keep inject_digest_at_tail as fallback for non-memdir environments
 def inject_digest_at_tail(
     messages: list[Message],
     store: DigestStore,
     session_id: str = "",
 ) -> list[Message]:
-    """Append digest as isVisibleInTranscriptOnly synthetic message at tail.
+    """Fallback: inject rules into JSONL if memdir is unavailable.
 
-    Design decisions (research-backed):
-    - Tail position: highest attention weight (Lost in the Middle U-curve)
-    - isVisibleInTranscriptOnly: shown in UI, never sent to API (zero token cost)
-    - Protection tag: never stripped by any strategy
+    Note: isVisibleInTranscriptOnly messages are NOT sent to Claude API.
+    This is a UI-only reference. Prefer sync_to_memdir() for actual injection.
     """
     text = build_injection_text(store)
     if not text:
         return messages
 
-    # Remove any existing digest injection (re-inject fresh)
     cleaned = [
         (idx, msg, size) for idx, msg, size in messages
         if not msg.get(PROTECTION_TAG)
     ]
 
-    # Build the injection message
     injection_msg = {
         "type": "user",
         "isVisibleInTranscriptOnly": True,
         PROTECTION_TAG: True,
-        "message": {
-            "role": "user",
-            "content": text,
-        },
+        "message": {"role": "user", "content": text},
     }
 
     from .helpers import msg_bytes
-    # Use max line index + 1 for the new entry
     max_idx = max((idx for idx, _, _ in cleaned), default=-1)
     cleaned.append((max_idx + 1, injection_msg, msg_bytes(injection_msg)))
 
-    # Update last_injection timestamp on injected rules
     now = datetime.now(timezone.utc).isoformat()
     for r in store.active_rules():
         r.last_injection = now
@@ -699,31 +784,38 @@ def flush_digest(
     project_dir: str = "",
     session_id: str = "",
 ) -> tuple[int, int, int]:
-    """Extract corrections from full session and save to disk.
+    """Extract corrections from full session, save to disk, sync to memdir.
 
     Called by PreCompact and Stop hooks to capture corrections before loss.
     Returns (added, upvoted, rejected).
     """
-    return update_digest(messages, since_turn=0, project_dir=project_dir, session_id=session_id)
+    added, upvoted, rejected = update_digest(
+        messages, since_turn=0, project_dir=project_dir, session_id=session_id,
+    )
+    # Sync active rules to Claude Code's memory system
+    store = load_digest_store(project_dir)
+    synced = sync_to_memdir(store, cwd=project_dir)
+    if synced > 0:
+        save_digest_store(store)  # Update last_injection timestamps
+    return added, upvoted, rejected
 
 
 def recover_digest(
-    messages: list[Message],
     project_dir: str = "",
-    session_id: str = "",
-) -> list[Message]:
-    """Re-inject digest at tail after compaction.
+) -> int:
+    """Re-sync digest to memdir after compaction.
 
-    Called by PostCompact hook. Loads stored rules and appends at tail.
-    Returns the updated message list.
+    Called by PostCompact hook. Memdir files survive compaction natively,
+    but re-sync ensures any newly promoted rules are included.
+    Returns number of rules synced.
     """
     store = load_digest_store(project_dir)
     if store.is_empty():
-        return messages
-
-    result = inject_digest_at_tail(messages, store, session_id)
-    save_digest_store(store)  # Update last_injection timestamps
-    return result
+        return 0
+    synced = sync_to_memdir(store, cwd=project_dir)
+    if synced > 0:
+        save_digest_store(store)
+    return synced
 
 
 def show_digest() -> str:

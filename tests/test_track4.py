@@ -226,37 +226,38 @@ class TestFlushRecoverCycle(unittest.TestCase):
             self.assertGreater(added, 0)
             self.assertTrue(digest_file.exists())
 
-    def test_recover_injects_at_tail(self):
+    def test_recover_syncs_to_memdir(self):
         digest_file = self.tmpdir / "behavioral-digest.json"
         digest_md = self.tmpdir / "behavioral-digest.md"
+        mem_dir = self.tmpdir / "memory"
+        mem_dir.mkdir()
 
-        # Pre-populate store with active rule
         store = _make_store_with_rules()
         with patch("cozempic.digest.DIGEST_DIR", self.tmpdir), \
              patch("cozempic.digest.DIGEST_FILE", digest_file), \
-             patch("cozempic.digest.DIGEST_MD_FILE", digest_md):
+             patch("cozempic.digest.DIGEST_MD_FILE", digest_md), \
+             patch("cozempic.digest._get_memdir", return_value=mem_dir):
             save_digest_store(store)
-
-            # Simulate post-compaction: just a compact summary
-            messages = [
-                make_message(0, {"type": "user", "isCompactSummary": True,
-                                 "message": {"role": "user", "content": "Summary..."}}),
-                make_user(1, "continue working"),
-            ]
-            result = recover_digest(messages, project_dir="/test")
-            # Should have original 2 + injected 1
-            self.assertEqual(len(result), 3)
-            last = result[-1][1]
-            self.assertTrue(last.get(PROTECTION_TAG))
+            synced = recover_digest(project_dir="/test")
+            self.assertGreater(synced, 0)
+            # Memory file should exist
+            digest_mem = mem_dir / "cozempic_digest.md"
+            self.assertTrue(digest_mem.exists())
+            content = digest_mem.read_text()
+            self.assertIn("BEHAVIORAL CONTRACT", content)
+            self.assertIn("Co-Authored-By", content)
 
     def test_full_cycle(self):
-        """Simulate: session → flush (PreCompact) → compaction → recover (PostCompact)."""
+        """Simulate: session → flush (PreCompact) → compaction → recover via memdir."""
         digest_file = self.tmpdir / "behavioral-digest.json"
         digest_md = self.tmpdir / "behavioral-digest.md"
+        mem_dir = self.tmpdir / "memory"
+        mem_dir.mkdir()
 
         with patch("cozempic.digest.DIGEST_DIR", self.tmpdir), \
              patch("cozempic.digest.DIGEST_FILE", digest_file), \
-             patch("cozempic.digest.DIGEST_MD_FILE", digest_md):
+             patch("cozempic.digest.DIGEST_MD_FILE", digest_md), \
+             patch("cozempic.digest._get_memdir", return_value=mem_dir):
 
             # Step 1: Session with corrections — flush extracts rules
             pre_compact = [
@@ -267,28 +268,22 @@ class TestFlushRecoverCycle(unittest.TestCase):
             ]
             flush_digest(pre_compact, project_dir="/test")
 
-            # Verify rules extracted
+            # Verify rules extracted — explicit corrections are now active immediately
             store = load_digest_store("/test")
             self.assertGreater(len(store.strategy_rules), 0)
+            active = store.active_rules()
+            self.assertGreater(len(active), 0, "Explicit corrections should be active immediately")
 
-            # Manually promote rules to active (simulates multi-session accumulation)
-            for r in store.strategy_rules:
-                r.status = "active"
-                r.occurrence_count = 5
-            save_digest_store(store)
+            # Step 2: Verify memdir file was created by flush
+            digest_mem = mem_dir / "cozempic_digest.md"
+            self.assertTrue(digest_mem.exists())
+            content = digest_mem.read_text()
+            self.assertIn("BEHAVIORAL CONTRACT", content)
 
-            # Step 2: Simulate compaction (lose all content)
-            post_compact = [
-                make_message(0, {"type": "user", "isCompactSummary": True,
-                                 "message": {"role": "user", "content": "Summary of conversation"}}),
-            ]
-
-            # Step 3: Recover — re-inject rules
-            recovered = recover_digest(post_compact, project_dir="/test")
-            digest_msgs = [m for _, m, _ in recovered if m.get(PROTECTION_TAG)]
-            # Rules should be back at tail
-            self.assertEqual(len(digest_msgs), 1)
-            self.assertIn("BEHAVIORAL CONTRACT", digest_msgs[0]["message"]["content"])
+            # Step 3: Compaction happens (memdir file survives on disk)
+            # Step 4: Recover just re-syncs — file already there
+            synced = recover_digest(project_dir="/test")
+            self.assertGreater(synced, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -304,11 +299,10 @@ class TestHooksJson(unittest.TestCase):
         data = json.loads(hooks_path.read_text())
         self.assertIn("hooks", data)
         hooks = data["hooks"]
-        # Verify all expected hook events exist
         self.assertIn("SessionStart", hooks)
         self.assertIn("PreCompact", hooks)
-        self.assertIn("PostCompact", hooks)
         self.assertIn("Stop", hooks)
+        # PostCompact removed — memdir survives compaction natively
 
     def test_digest_commands_in_hooks(self):
         hooks_path = Path(__file__).parent.parent / "plugin" / "hooks" / "hooks.json"
@@ -317,7 +311,6 @@ class TestHooksJson(unittest.TestCase):
         raw = hooks_path.read_text()
         self.assertIn("digest inject", raw)
         self.assertIn("digest flush", raw)
-        self.assertIn("digest recover", raw)
 
 
 if __name__ == "__main__":

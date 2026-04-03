@@ -202,8 +202,8 @@ class TestScoreRule(unittest.TestCase):
         rule = DigestRule(id="R001", rule="test", occurrence_count=1,
                           source_reliability=1.0, type_prior=0.8)
         score = score_rule(rule, days_since_last=0)
-        # 0.25*(1/3) + 0.30*1.0 + 0.20*1.0 + 0.25*0.8 = 0.0833 + 0.30 + 0.20 + 0.20 = 0.7833
-        self.assertAlmostEqual(score, 0.7833, places=3)
+        # 0.25*(1/2) + 0.30*1.0 + 0.20*1.0 + 0.25*0.8 = 0.125 + 0.30 + 0.20 + 0.20 = 0.825
+        self.assertAlmostEqual(score, 0.825, places=3)
 
     def test_above_admission(self):
         rule = DigestRule(id="R001", rule="test", occurrence_count=1,
@@ -270,15 +270,17 @@ class TestAdmitRule(unittest.TestCase):
         self.assertEqual(store.strategy_rules[0].occurrence_count, 2)
 
     def test_promotes_after_threshold(self):
+        """Pending rule gets promoted to active after PROMOTION_COUNT upvotes."""
         store = DigestStore()
-        rule = DigestRule(id="R001", rule="Do not add Co-Authored-By",
-                          source_reliability=1.0, type_prior=0.8,
+        # Start as pending (implicit correction, not auto-promoted)
+        rule = DigestRule(id="R001", rule="Use snake_case for variables",
+                          source_reliability=0.6, type_prior=0.6,
                           occurrence_count=PROMOTION_COUNT - 1, status="pending")
         store.strategy_rules.append(rule)
 
-        dup = DigestRule(id="", rule="Do not add Co-Authored-By to commits",
-                         evidence="don't add Co-Authored-By",
-                         source_reliability=1.0, type_prior=0.8)
+        dup = DigestRule(id="", rule="Use snake_case for variable names",
+                         evidence="use snake_case for variables",
+                         source_reliability=0.6, type_prior=0.6)
         admit_rule(dup, store)
         self.assertEqual(store.strategy_rules[0].status, "active")
 
