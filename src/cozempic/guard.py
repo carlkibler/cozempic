@@ -606,21 +606,98 @@ def guard_prune_cycle(
     return result
 
 
-def _terminate_and_resume(claude_pid: int, project_dir: str, session_id: str | None = None) -> None:
-    """Send SIGTERM to Claude, wait up to 5s for exit, SIGKILL if needed, then spawn resume.
-
-    In SSH sessions the resume watcher can't open a new terminal, so we skip
-    termination entirely — the session was pruned in place and Claude will
-    continue with the reduced context.
-    """
+def _detect_terminal_env() -> str:
+    """Detect the terminal environment: 'tmux', 'screen', 'ssh', or 'plain'."""
+    if os.environ.get("TMUX"):
+        return "tmux"
+    if os.environ.get("STY"):
+        return "screen"
     if is_ssh_session():
-        resume_flag = f"--resume {session_id}" if session_id else "--resume"
-        print(f"  SSH session — skipping terminate+resume. Resume manually: claude {resume_flag}")
-        return
+        return "ssh"
+    return "plain"
 
+
+def _wait_for_exit(pid: int, timeout: float = 5.0) -> bool:
+    """Wait for a process to exit. Returns True if exited, False if still alive."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.2)
+        except (ProcessLookupError, PermissionError, OSError):
+            return True
+    return False
+
+
+def _terminate_and_resume(claude_pid: int, project_dir: str, session_id: str | None = None) -> None:
+    """Gracefully exit Claude and resume in the same terminal where possible.
+
+    Priority:
+      1. tmux/screen: send-keys "/exit" → wait → send-keys "claude --resume" (same pane)
+      2. macOS plain: SIGTERM → osascript keystrokes to frontmost terminal
+      3. Linux plain: SIGTERM → open new terminal with resume
+      4. SSH: skip terminate, print manual instructions
+    """
+    resume_flag = f"--resume {session_id}" if session_id else "--resume"
+    resume_cmd = f"claude {resume_flag}"
+    term_env = _detect_terminal_env()
     system = platform.system()
 
-    # 1. Ask Claude to exit
+    if term_env == "ssh":
+        print(f"  SSH session — skipping terminate+resume. Resume manually: {resume_cmd}")
+        return
+
+    if term_env == "tmux":
+        # tmux: graceful /exit via send-keys, then resume in same pane
+        pane = os.environ.get("TMUX_PANE", "")
+        target = f"-t {pane}" if pane else ""
+        print(f"  tmux detected — sending /exit and auto-resuming in same pane...")
+
+        # Send /exit to Claude
+        subprocess.run(
+            ["tmux", "send-keys", *(["-t", pane] if pane else []), "/exit", "Enter"],
+            capture_output=True, timeout=5,
+        )
+
+        # Wait for Claude to exit
+        if not _wait_for_exit(claude_pid, timeout=10.0):
+            os.kill(claude_pid, signal.SIGTERM)
+            _wait_for_exit(claude_pid, timeout=5.0)
+
+        time.sleep(1)
+
+        # Resume in same pane
+        subprocess.run(
+            ["tmux", "send-keys", *(["-t", pane] if pane else []),
+             f"cd {shell_quote(project_dir)} && {resume_cmd}", "Enter"],
+            capture_output=True, timeout=5,
+        )
+        return
+
+    if term_env == "screen":
+        # GNU screen: similar to tmux
+        screen_session = os.environ.get("STY", "")
+        print(f"  screen detected — sending /exit and auto-resuming...")
+
+        subprocess.run(
+            ["screen", "-S", screen_session, "-X", "stuff", "/exit\n"],
+            capture_output=True, timeout=5,
+        )
+
+        if not _wait_for_exit(claude_pid, timeout=10.0):
+            os.kill(claude_pid, signal.SIGTERM)
+            _wait_for_exit(claude_pid, timeout=5.0)
+
+        time.sleep(1)
+
+        subprocess.run(
+            ["screen", "-S", screen_session, "-X", "stuff",
+             f"cd {shell_quote(project_dir)} && {resume_cmd}\n"],
+            capture_output=True, timeout=5,
+        )
+        return
+
+    # Plain terminal — SIGTERM + spawn resume watcher
     try:
         if system == "Windows":
             subprocess.call(["taskkill", "/PID", str(claude_pid)],
@@ -628,18 +705,9 @@ def _terminate_and_resume(claude_pid: int, project_dir: str, session_id: str | N
         else:
             os.kill(claude_pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
-        pass  # Already dead
+        pass
 
-    # 2. Poll for exit up to 5s
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        try:
-            os.kill(claude_pid, 0)
-            time.sleep(0.2)
-        except (ProcessLookupError, PermissionError, OSError):
-            break
-    else:
-        # Still alive — force kill
+    if not _wait_for_exit(claude_pid, timeout=5.0):
         try:
             if system == "Windows":
                 subprocess.call(["taskkill", "/F", "/PID", str(claude_pid)],
@@ -649,7 +717,6 @@ def _terminate_and_resume(claude_pid: int, project_dir: str, session_id: str | N
         except (ProcessLookupError, PermissionError, OSError):
             pass
 
-    # 3. Spawn the resume watcher (opens new terminal after process fully exits)
     _spawn_reload_watcher(claude_pid, project_dir, session_id=session_id)
 
 
