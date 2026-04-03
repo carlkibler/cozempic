@@ -18,9 +18,11 @@ from .types import Message
 DEFAULT_CONTEXT_WINDOW = 200_000
 SYSTEM_OVERHEAD_TOKENS = 21_000
 
-# Default token thresholds as fractions of context window
-DEFAULT_HARD_TOKEN_PCT = 0.75  # 75% — hard prune + reload
-DEFAULT_SOFT_TOKEN_PCT = 0.45  # 45% — gentle prune, no reload
+# 4-tier pruning thresholds as fractions of context window
+DEFAULT_SOFT_TOKEN_PCT = 0.25   # 25% — gentle file maintenance, no reload
+DEFAULT_HARD1_TOKEN_PCT = 0.55  # 55% — standard prune + reload
+DEFAULT_HARD2_TOKEN_PCT = 0.80  # 80% — aggressive prune + reload (emergency)
+DEFAULT_HARD_TOKEN_PCT = 0.55   # Alias for backward compat (guard uses this)
 
 
 def get_system_overhead_tokens() -> int:
@@ -44,26 +46,26 @@ def get_system_overhead_tokens() -> int:
 def default_token_thresholds(context_window: int = DEFAULT_CONTEXT_WINDOW) -> tuple[int, int]:
     """Compute default hard and soft token thresholds from context window.
 
-    Hard threshold is always 75%. Soft threshold scales with context size:
-    - 200K context: 45% (conservative, triggers gentle prune early)
-    - 1M context: 55% (less aggressive, avoids unnecessary prune cycles)
+    4-tier system:
+      Soft (25%):  gentle file maintenance, no reload (preemptive cleanup)
+      Hard1 (55%): standard prune + reload (first real prune)
+      Hard2 (80%): aggressive prune + reload (emergency, before CC compaction)
+      User (90%):  user-triggered aggressive (manual last resort)
 
     Returns (hard_threshold, soft_threshold) in tokens.
+    For backward compat, returns the hard1 (55%) as "hard" and soft (25%) as "soft".
     """
-    hard = int(context_window * DEFAULT_HARD_TOKEN_PCT)
-    # Scale soft threshold: larger context windows can tolerate higher fill
-    # before gentle pruning is needed. Linear interpolation between 45%–55%.
-    if context_window <= 200_000:
-        soft_pct = DEFAULT_SOFT_TOKEN_PCT  # 0.45
-    elif context_window >= 1_000_000:
-        soft_pct = 0.55
-    else:
-        # Linear interpolation for intermediate sizes
-        soft_pct = DEFAULT_SOFT_TOKEN_PCT + (0.55 - DEFAULT_SOFT_TOKEN_PCT) * (
-            (context_window - 200_000) / (1_000_000 - 200_000)
-        )
-    soft = int(context_window * soft_pct)
+    hard = int(context_window * DEFAULT_HARD1_TOKEN_PCT)
+    soft = int(context_window * DEFAULT_SOFT_TOKEN_PCT)
     return hard, soft
+
+
+def default_token_thresholds_4tier(context_window: int = DEFAULT_CONTEXT_WINDOW) -> tuple[int, int, int]:
+    """Compute all 4-tier thresholds. Returns (soft, hard1, hard2) in tokens."""
+    soft = int(context_window * DEFAULT_SOFT_TOKEN_PCT)
+    hard1 = int(context_window * DEFAULT_HARD1_TOKEN_PCT)
+    hard2 = int(context_window * DEFAULT_HARD2_TOKEN_PCT)
+    return soft, hard1, hard2
 
 # Model → context window mapping
 # Claude Code does NOT append "[1m]" to model IDs in the JSONL — the model

@@ -193,14 +193,21 @@ class TestDefaultTokenThresholds1M(unittest.TestCase):
     def test_200k_thresholds(self):
         from cozempic.tokens import default_token_thresholds
         hard, soft = default_token_thresholds(200_000)
-        self.assertEqual(hard, 150_000)   # 75% of 200K
-        self.assertEqual(soft, 90_000)    # 45% of 200K
+        self.assertEqual(hard, 110_000)   # 55% of 200K (hard1)
+        self.assertEqual(soft, 50_000)    # 25% of 200K
 
     def test_1m_thresholds(self):
         from cozempic.tokens import default_token_thresholds
         hard, soft = default_token_thresholds(1_000_000)
-        self.assertEqual(hard, 750_000)   # 75% of 1M
-        self.assertEqual(soft, 550_000)   # 55% of 1M (scaled up from 45%)
+        self.assertEqual(hard, 550_000)   # 55% of 1M (hard1)
+        self.assertEqual(soft, 250_000)   # 25% of 1M
+
+    def test_4tier_thresholds(self):
+        from cozempic.tokens import default_token_thresholds_4tier
+        soft, hard1, hard2 = default_token_thresholds_4tier(1_000_000)
+        self.assertEqual(soft, 250_000)    # 25% of 1M
+        self.assertEqual(hard1, 550_000)   # 55% of 1M
+        self.assertEqual(hard2, 800_000)   # 80% of 1M
 
 
 if __name__ == "__main__":

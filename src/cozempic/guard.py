@@ -253,15 +253,17 @@ def start_guard(
     session_path = sess["path"]
 
     # Detect context window from session data (used for display + overflow scaling)
-    from .tokens import detect_context_window, DEFAULT_HARD_TOKEN_PCT
+    from .tokens import detect_context_window, default_token_thresholds_4tier, DEFAULT_HARD2_TOKEN_PCT
     messages_for_model = load_messages(session_path)
     context_window = detect_context_window(messages_for_model)
 
-    # Default to token-based thresholds when none specified
+    # Default to 4-tier token thresholds when none specified
     if threshold_tokens is None:
-        threshold_tokens, soft_threshold_tokens = default_token_thresholds(context_window)
-    elif soft_threshold_tokens is None:
-        soft_threshold_tokens = int(threshold_tokens * 0.6)
+        soft_threshold_tokens, threshold_tokens, hard2_threshold_tokens = default_token_thresholds_4tier(context_window)
+    else:
+        hard2_threshold_tokens = int(context_window * DEFAULT_HARD2_TOKEN_PCT)
+        if soft_threshold_tokens is None:
+            soft_threshold_tokens = int(threshold_tokens * 0.45)
 
     # Persist cwd + context_window to the sidecar so reload and guard resume
     # can resolve the project directory without relying on slug reversal.
@@ -279,23 +281,17 @@ def start_guard(
     else:
         ctx_str = f"{context_window / 1_000:.0f}K"
 
-    # Compute threshold %s of context window for display
-    if threshold_tokens is not None and context_window:
-        threshold_pct = int(threshold_tokens / context_window * 100)
-    else:
-        threshold_pct = 50  # default
-    if soft_threshold_tokens is not None and context_window:
-        soft_threshold_pct = int(soft_threshold_tokens / context_window * 100)
-    else:
-        soft_threshold_pct = int(threshold_pct * 0.6)
+    # Compute threshold %s for display
+    soft_pct = int(soft_threshold_tokens / context_window * 100) if soft_threshold_tokens and context_window else 25
+    hard1_pct = int(threshold_tokens / context_window * 100) if threshold_tokens and context_window else 55
+    hard2_pct = int(hard2_threshold_tokens / context_window * 100) if hard2_threshold_tokens and context_window else 80
 
-    reload_str = "and reload with an optimized clean context" if auto_reload else "in place (no reload)"
     print(
-        f"\n  Guard is protecting and optimizing context storage with the {rx_name} prescription. "
-        f"At {soft_threshold_pct}% context it will do a gentle prune (no reload). "
-        f"At {threshold_pct}% it will do a full prune "
-        f"(clean up junk like progress bars while protecting agent team states — "
-        f"TeamCreate, SendMessage, TaskCreate messages) {reload_str}.\n"
+        f"\n  4-tier guard protecting context ({ctx_str} window):\n"
+        f"    Soft  ({soft_pct}%): gentle prune, no reload (file maintenance)\n"
+        f"    Hard1 ({hard1_pct}%): {rx_name} prune + reload\n"
+        f"    Hard2 ({hard2_pct}%): aggressive prune + reload (emergency)\n"
+        f"    User  (90%): manual aggressive (cozempic treat -rx aggressive --execute)\n"
     )
 
     # Reactive overflow recovery via file watcher
@@ -388,19 +384,44 @@ def start_guard(
             if threshold_tokens is not None or soft_threshold_tokens is not None:
                 current_tokens = quick_token_estimate(session_path)
 
-            # ── Phase 3: HARD prune at hard threshold ─────────────────
-            hard_bytes_hit = current_size >= hard_threshold_bytes
-            hard_tokens_hit = (
-                threshold_tokens is not None
+            # ── Phase 4: HARD2 (80%) — aggressive + reload (emergency) ──
+            hard2_tokens_hit = (
+                hard2_threshold_tokens is not None
                 and current_tokens is not None
-                and current_tokens >= threshold_tokens
+                and current_tokens >= hard2_threshold_tokens
             )
-            if hard_bytes_hit or hard_tokens_hit:
+            if hard2_tokens_hit:
                 prune_count += 1
-                size_mb = current_size / 1024 / 1024
-                reason = f"{size_mb:.1f}MB >= {threshold_mb}MB" if hard_bytes_hit else f"{current_tokens:,} tokens >= {threshold_tokens:,}"
-                print(f"  [{_now()}] HARD THRESHOLD: {reason}")
-                print(f"  Emergency prune with {rx_name} (cycle #{prune_count})...")
+                reason = f"{current_tokens:,} tokens >= {hard2_threshold_tokens:,} (80%)"
+                print(f"  [{_now()}] EMERGENCY THRESHOLD (80%): {reason}")
+                print(f"  Aggressive prune + reload (cycle #{prune_count})...")
+
+                result = guard_prune_cycle(
+                    session_path=session_path,
+                    rx_name="aggressive",
+                    config=config,
+                    auto_reload=auto_reload,
+                    cwd=cwd or os.getcwd(),
+                    session_id=sess["session_id"],
+                )
+
+                if result.get("reloading"):
+                    print(f"  Reload triggered. Guard exiting.")
+                    break
+
+                print(f"  Pruned: {_fmt_prune_result(result)}")
+                if result.get("team_name"):
+                    print(f"  Team '{result['team_name']}' state preserved ({result['team_messages']} messages)")
+                print()
+
+            # ── Phase 3: HARD1 (55%) — standard + reload ─────────────
+            elif (threshold_tokens is not None
+                  and current_tokens is not None
+                  and current_tokens >= threshold_tokens):
+                prune_count += 1
+                reason = f"{current_tokens:,} tokens >= {threshold_tokens:,} (55%)"
+                print(f"  [{_now()}] HARD THRESHOLD (55%): {reason}")
+                print(f"  Standard prune + reload (cycle #{prune_count})...")
 
                 result = guard_prune_cycle(
                     session_path=session_path,
@@ -417,56 +438,46 @@ def start_guard(
 
                 print(f"  Pruned: {_fmt_prune_result(result)}")
                 if result.get("team_name"):
-                    print(
-                        f"  Team '{result['team_name']}' state preserved "
-                        f"({result['team_messages']} messages)"
-                    )
+                    print(f"  Team '{result['team_name']}' state preserved ({result['team_messages']} messages)")
 
-                # Circuit breaker: if hard prune keeps freeing nothing, warn and back off
                 if result.get("saved_mb", 0) <= 0:
                     consecutive_empty_hard_prunes += 1
                     if consecutive_empty_hard_prunes >= 3:
-                        print(
-                            f"  [{_now()}] WARNING: Hard prune freed 0 bytes 3x in a row. "
-                            f"'{rx_name}' prescription may not match this session's content."
-                        )
-                        print(f"  Try: cozempic treat current -rx aggressive --execute")
+                        print(f"  [{_now()}] WARNING: Hard prune freed 0 bytes 3x in a row.")
                         consecutive_empty_hard_prunes = 0
                         time.sleep(interval * 4)
                 else:
                     consecutive_empty_hard_prunes = 0
                 print()
 
-            # ── Phase 2: SOFT prune at soft threshold ─────────────────
+            # ── Phase 2: SOFT (25%) — gentle, no reload ──────────────
             else:
+                hard_bytes_hit = current_size >= hard_threshold_bytes
                 soft_bytes_hit = current_size >= soft_threshold_bytes
                 soft_tokens_hit = (
                     soft_threshold_tokens is not None
                     and current_tokens is not None
                     and current_tokens >= soft_threshold_tokens
                 )
-                if soft_bytes_hit or soft_tokens_hit:
+                if hard_bytes_hit or soft_bytes_hit or soft_tokens_hit:
                     soft_prune_count += 1
                     size_mb = current_size / 1024 / 1024
-                    reason = f"{size_mb:.1f}MB >= {soft_threshold_mb}MB" if soft_bytes_hit else f"{current_tokens:,} tokens >= {soft_threshold_tokens:,}"
-                    print(f"  [{_now()}] SOFT THRESHOLD: {reason}")
+                    reason = f"{current_tokens:,} tokens >= {soft_threshold_tokens:,} (25%)" if soft_tokens_hit else f"{size_mb:.1f}MB"
+                    print(f"  [{_now()}] SOFT THRESHOLD (25%): {reason}")
                     print(f"  Gentle prune, no reload (cycle #{soft_prune_count})...")
 
                     result = guard_prune_cycle(
                         session_path=session_path,
                         rx_name="gentle",
                         config=config,
-                        auto_reload=False,  # Never reload on soft prune
+                        auto_reload=False,
                         cwd=cwd or os.getcwd(),
                         session_id=sess["session_id"],
                     )
 
                     print(f"  Trimmed: {_fmt_prune_result(result)}")
                     if result.get("team_name"):
-                        print(
-                            f"  Team '{result['team_name']}' state preserved "
-                            f"({result['team_messages']} messages)"
-                        )
+                        print(f"  Team '{result['team_name']}' state preserved ({result['team_messages']} messages)")
                     print()
 
     except KeyboardInterrupt:
@@ -655,7 +666,11 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
     system = platform.system()
 
     if system == "Darwin":
+        # Resume in the SAME terminal by typing the command into the frontmost window
+        # instead of opening a new one. Falls back to new window if keystroke fails.
         resume_cmd = (
+            f"osascript -e 'tell application \"System Events\" to keystroke "
+            f"\"cd {project_dir} && claude {resume_flag}\" & return' 2>/dev/null || "
             f"osascript -e 'tell application \"Terminal\" to do script "
             f"\"cd {shell_quote(project_dir)} && claude {resume_flag}\"'"
         )
