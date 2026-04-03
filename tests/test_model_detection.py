@@ -79,27 +79,44 @@ class TestDetectModel(unittest.TestCase):
 
 class TestDetectContextWindow(unittest.TestCase):
 
-    def test_opus_46_is_200k(self):
+    def test_opus_46_is_1m(self):
+        """Current Opus 4.6 defaults to 1M (standard for Claude Code Max)."""
         messages = [make_assistant_with_model(0, "claude-opus-4-6")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
+    def test_sonnet_46_is_1m(self):
+        """Current Sonnet 4.6 defaults to 1M."""
+        messages = [make_assistant_with_model(0, "claude-sonnet-4-6")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
+    def test_opus_45_is_1m(self):
+        messages = [make_assistant_with_model(0, "claude-opus-4-5")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
+    def test_haiku_45_is_200k(self):
+        """Haiku stays at 200K."""
+        messages = [make_assistant_with_model(0, "claude-haiku-4-5")]
         self.assertEqual(detect_context_window(messages), 200_000)
 
-    def test_sonnet_46_is_200k(self):
-        messages = [make_assistant_with_model(0, "claude-sonnet-4-6")]
-        self.assertEqual(detect_context_window(messages), 200_000)
+    def test_older_models_200k(self):
+        """Older claude-3 models are 200K."""
+        for model in ["claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku"]:
+            messages = [make_assistant_with_model(0, model)]
+            self.assertEqual(detect_context_window(messages), 200_000, f"{model} should be 200K")
 
     def test_unknown_model_falls_back(self):
         messages = [make_assistant_with_model(0, "claude-future-99")]
         self.assertEqual(detect_context_window(messages), DEFAULT_CONTEXT_WINDOW)
 
-    def test_prefix_match(self):
+    def test_prefix_match_versioned(self):
         """Versioned model IDs like claude-opus-4-6-20260301 should match."""
         messages = [make_assistant_with_model(0, "claude-opus-4-6-20260301")]
-        self.assertEqual(detect_context_window(messages), 200_000)
+        self.assertEqual(detect_context_window(messages), 1_000_000)
 
     def test_env_override(self):
         messages = [make_assistant_with_model(0, "claude-opus-4-6")]
-        with patch.dict(os.environ, {"COZEMPIC_CONTEXT_WINDOW": "1000000"}):
-            self.assertEqual(detect_context_window(messages), 1_000_000)
+        with patch.dict(os.environ, {"COZEMPIC_CONTEXT_WINDOW": "200000"}):
+            self.assertEqual(detect_context_window(messages), 200_000)
 
     def test_env_override_beats_model(self):
         messages = [make_assistant_with_model(0, "claude-sonnet-4-6")]
@@ -109,50 +126,7 @@ class TestDetectContextWindow(unittest.TestCase):
     def test_invalid_env_override_ignored(self):
         messages = [make_assistant_with_model(0, "claude-opus-4-6")]
         with patch.dict(os.environ, {"COZEMPIC_CONTEXT_WINDOW": "not_a_number"}):
-            self.assertEqual(detect_context_window(messages), 200_000)
-
-    # ─── 1M context window tests ────────────────────────────────────────────
-
-    def test_opus_46_1m_exact_match(self):
-        """claude-opus-4-6[1m] should return 1M context."""
-        messages = [make_assistant_with_model(0, "claude-opus-4-6[1m]")]
-        self.assertEqual(detect_context_window(messages), 1_000_000)
-
-    def test_sonnet_46_1m_exact_match(self):
-        """claude-sonnet-4-6[1m] should return 1M context."""
-        messages = [make_assistant_with_model(0, "claude-sonnet-4-6[1m]")]
-        self.assertEqual(detect_context_window(messages), 1_000_000)
-
-    def test_opus_45_1m_exact_match(self):
-        """claude-opus-4-5[1m] should return 1M context."""
-        messages = [make_assistant_with_model(0, "claude-opus-4-5[1m]")]
-        self.assertEqual(detect_context_window(messages), 1_000_000)
-
-    def test_haiku_45_1m_exact_match(self):
-        """claude-haiku-4-5[1m] should return 1M context."""
-        messages = [make_assistant_with_model(0, "claude-haiku-4-5[1m]")]
-        self.assertEqual(detect_context_window(messages), 1_000_000)
-
-    def test_1m_versioned_prefix_match(self):
-        """claude-opus-4-6-20260301[1m] should match via prefix logic."""
-        messages = [make_assistant_with_model(0, "claude-opus-4-6-20260301[1m]")]
-        self.assertEqual(detect_context_window(messages), 1_000_000)
-
-    def test_1m_sonnet_versioned_prefix_match(self):
-        """claude-sonnet-4-6-20260301[1m] should match via prefix logic."""
-        messages = [make_assistant_with_model(0, "claude-sonnet-4-6-20260301[1m]")]
-        self.assertEqual(detect_context_window(messages), 1_000_000)
-
-    def test_versioned_200k_not_confused_with_1m(self):
-        """claude-opus-4-6-20260301 (no [1m]) should stay 200K."""
-        messages = [make_assistant_with_model(0, "claude-opus-4-6-20260301")]
-        self.assertEqual(detect_context_window(messages), 200_000)
-
-    def test_env_override_beats_1m_model(self):
-        """Env var override should take priority over [1m] model detection."""
-        messages = [make_assistant_with_model(0, "claude-opus-4-6[1m]")]
-        with patch.dict(os.environ, {"COZEMPIC_CONTEXT_WINDOW": "500000"}):
-            self.assertEqual(detect_context_window(messages), 500_000)
+            self.assertEqual(detect_context_window(messages), 1_000_000)
 
 
 class TestGetContextWindowOverride(unittest.TestCase):
@@ -176,27 +150,27 @@ class TestEstimateSessionTokensWithModel(unittest.TestCase):
         messages = [make_assistant_with_model(0, "claude-opus-4-6", input_tokens=50000)]
         te = estimate_session_tokens(messages)
         self.assertEqual(te.model, "claude-opus-4-6")
-        self.assertEqual(te.context_window, 200_000)
+        self.assertEqual(te.context_window, 1_000_000)  # Opus 4.6 defaults to 1M
         self.assertEqual(te.total, 50100)  # 50000 + 100(output)
-        self.assertEqual(te.context_pct, 25.1)
+        self.assertEqual(te.context_pct, 5.0)  # 50100 / 1M ≈ 5.0%
 
-    def test_context_pct_uses_detected_window(self):
-        """100K tokens on a 200K window should be 50%."""
+    def test_context_pct_1m_model(self):
+        """100K tokens on a 1M window should be ~10%."""
         messages = [make_assistant_with_model(0, "claude-sonnet-4-6", input_tokens=100000)]
         te = estimate_session_tokens(messages)
-        self.assertEqual(te.context_pct, 50.0)  # (100000 + 100 output) / 200K ≈ 50.0
-
-    def test_1m_model_context_pct(self):
-        """100K tokens on a 1M window should be 10%."""
-        messages = [make_assistant_with_model(0, "claude-opus-4-6[1m]", input_tokens=100000)]
-        te = estimate_session_tokens(messages)
-        self.assertEqual(te.model, "claude-opus-4-6[1m]")
         self.assertEqual(te.context_window, 1_000_000)
         self.assertEqual(te.context_pct, 10.0)
 
-    def test_1m_model_500k_tokens(self):
+    def test_context_pct_200k_model(self):
+        """100K tokens on a 200K window (Haiku) should be ~50%."""
+        messages = [make_assistant_with_model(0, "claude-haiku-4-5", input_tokens=100000)]
+        te = estimate_session_tokens(messages)
+        self.assertEqual(te.context_window, 200_000)
+        self.assertEqual(te.context_pct, 50.0)
+
+    def test_500k_tokens_on_1m(self):
         """500K tokens on a 1M window should be 50%."""
-        messages = [make_assistant_with_model(0, "claude-opus-4-6[1m]", input_tokens=500000)]
+        messages = [make_assistant_with_model(0, "claude-opus-4-6", input_tokens=500000)]
         te = estimate_session_tokens(messages)
         self.assertEqual(te.context_pct, 50.0)
 

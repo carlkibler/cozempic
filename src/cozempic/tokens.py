@@ -66,22 +66,19 @@ def default_token_thresholds(context_window: int = DEFAULT_CONTEXT_WINDOW) -> tu
     return hard, soft
 
 # Model → context window mapping
-# Claude Code appends "[1m]" to model IDs when using extended 1M context.
-# Standard models use 200K. Use COZEMPIC_CONTEXT_WINDOW env var or
-# --context-window flag to override.
+# Claude Code does NOT append "[1m]" to model IDs in the JSONL — the model
+# field always contains the base ID (e.g., "claude-opus-4-6"). 1M context is
+# the standard for current models on Max plans, so we default 4.5/4.6 to 1M.
+# Users on Pro (200K) can override with COZEMPIC_CONTEXT_WINDOW=200000.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    # Extended 1M context variants (Claude Code appends [1m] suffix)
-    "claude-opus-4-6[1m]": 1_000_000,
-    "claude-opus-4-5[1m]": 1_000_000,
-    "claude-sonnet-4-6[1m]": 1_000_000,
-    "claude-sonnet-4-5[1m]": 1_000_000,
-    "claude-haiku-4-5[1m]": 1_000_000,
-    # Standard 200K context
-    "claude-opus-4-6": 200_000,
-    "claude-opus-4-5": 200_000,
-    "claude-sonnet-4-6": 200_000,
-    "claude-sonnet-4-5": 200_000,
+    # Current models — default 1M (standard for Claude Code Max plans)
+    "claude-opus-4-6": 1_000_000,
+    "claude-opus-4-5": 1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-sonnet-4-5": 1_000_000,
+    # Haiku — 200K (not available on 1M in Claude Code)
     "claude-haiku-4-5": 200_000,
+    # Older models — 200K
     "claude-3-5-sonnet": 200_000,
     "claude-3-5-haiku": 200_000,
     "claude-3-opus": 200_000,
