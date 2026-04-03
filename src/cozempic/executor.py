@@ -21,6 +21,25 @@ def execute_actions(
         elif action.action == "replace" and action.replacement:
             replacements[action.line_index] = action.replacement
 
+    # T1.5: Protect tool_use messages whose tool_results are kept
+    tool_result_refs: set[str] = set()
+    for idx, msg, _ in messages:
+        if idx in removals:
+            continue
+        for block in get_content_blocks(msg):
+            if block.get("type") == "tool_result":
+                use_id = block.get("tool_use_id", "")
+                if use_id:
+                    tool_result_refs.add(use_id)
+
+    for idx, msg, _ in messages:
+        if idx not in removals:
+            continue
+        for block in get_content_blocks(msg):
+            if block.get("type") == "tool_use" and block.get("id", "") in tool_result_refs:
+                removals.discard(idx)
+                break
+
     result: list[Message] = []
     for idx, msg, size in messages:
         if idx in removals:
@@ -29,6 +48,71 @@ def execute_actions(
             new_msg = replacements[idx]
             new_size = msg_bytes(new_msg)
             result.append((idx, new_msg, new_size))
+        else:
+            result.append((idx, msg, size))
+
+    # T1.4: Re-link parent chains through removed messages
+    result = _relink_parent_chain(messages, result, removals)
+
+    return result
+
+
+def _relink_parent_chain(
+    messages_before: list[Message],
+    messages_after: list[Message],
+    removals: set[int],
+) -> list[Message]:
+    """Re-link parentUuid and logicalParentUuid, skipping removed entries."""
+    if not removals:
+        return messages_after
+
+    # Build maps from the original messages
+    uuid_to_parent: dict[str, str] = {}
+    uuid_to_logical: dict[str, str] = {}
+    removed_uuids: set[str] = set()
+
+    for idx, msg, _ in messages_before:
+        u = msg.get("uuid", "")
+        if u:
+            if "parentUuid" in msg:
+                uuid_to_parent[u] = msg.get("parentUuid") or ""
+            if "logicalParentUuid" in msg:
+                uuid_to_logical[u] = msg.get("logicalParentUuid") or ""
+        if idx in removals and u:
+            removed_uuids.add(u)
+
+    if not removed_uuids:
+        return messages_after
+
+    def resolve(uuid: str, chain: dict[str, str]) -> str | None:
+        """Walk up the chain until we find a non-removed UUID."""
+        seen: set[str] = set()
+        cur = uuid
+        while cur and cur not in seen:
+            seen.add(cur)
+            if cur not in removed_uuids:
+                return cur
+            cur = chain.get(cur, "")
+        return None
+
+    result = []
+    for idx, msg, size in messages_after:
+        changed = False
+        new_msg = msg
+
+        if msg.get("parentUuid") in removed_uuids:
+            new_msg = dict(new_msg)
+            new_msg["parentUuid"] = resolve(msg["parentUuid"], uuid_to_parent)
+            changed = True
+
+        if msg.get("logicalParentUuid") in removed_uuids:
+            if new_msg is msg:
+                new_msg = dict(msg)
+            new_msg["logicalParentUuid"] = resolve(msg["logicalParentUuid"], uuid_to_logical)
+            changed = True
+
+        if changed:
+            result.append((idx, new_msg, msg_bytes(new_msg)))
         else:
             result.append((idx, msg, size))
 

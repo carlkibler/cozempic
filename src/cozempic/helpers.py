@@ -55,6 +55,31 @@ def is_ssh_session() -> bool:
     )
 
 
+_PROTECTED_TYPES = frozenset({
+    "content-replacement",
+    "marble-origami-commit",
+    "marble-origami-snapshot",
+    "worktree-state",
+    "task-summary",
+})
+
+
+def is_protected(msg: dict) -> bool:
+    """Return True if this entry must NEVER be removed or structurally modified."""
+    t = msg.get("type", "")
+    if t in _PROTECTED_TYPES:
+        return True
+    if t == "user" and msg.get("isCompactSummary"):
+        return True
+    if t == "system" and msg.get("subtype") in ("compact_boundary", "microcompact_boundary"):
+        return True
+    if msg.get("isVisibleInTranscriptOnly"):
+        return True
+    if msg.get("__cozempic_behavioral_digest__"):
+        return True
+    return False
+
+
 def text_of(block: dict) -> str:
     """Get the text content of a content block, handling all block types."""
     result = block.get("text", "") or block.get("thinking", "") or block.get("content", "")

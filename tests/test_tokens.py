@@ -136,7 +136,7 @@ class TestExtractUsageTokens(unittest.TestCase):
         self.assertEqual(result["input_tokens"], 1000)
         self.assertEqual(result["cache_creation_input_tokens"], 200)
         self.assertEqual(result["cache_read_input_tokens"], 300)
-        self.assertEqual(result["total"], 1500)  # 1000 + 200 + 300
+        self.assertEqual(result["total"], 1700)  # 1000 + 200 + 300 + 200(output)
 
     def test_skips_sidechain(self):
         messages = [
@@ -147,7 +147,7 @@ class TestExtractUsageTokens(unittest.TestCase):
         result = extract_usage_tokens(messages)
         self.assertIsNotNone(result)
         self.assertEqual(result["input_tokens"], 800)
-        self.assertEqual(result["total"], 800)
+        self.assertEqual(result["total"], 1000)  # 800 + 200(output)
 
     def test_skips_parse_errors(self):
         messages = [
@@ -157,7 +157,7 @@ class TestExtractUsageTokens(unittest.TestCase):
         ]
         result = extract_usage_tokens(messages)
         self.assertIsNotNone(result)
-        self.assertEqual(result["total"], 600)
+        self.assertEqual(result["total"], 800)  # 600 + 200(output)
 
     def test_returns_none_when_no_usage(self):
         messages = [
@@ -257,8 +257,8 @@ class TestEstimateSessionTokens(unittest.TestCase):
         te = estimate_session_tokens(messages)
         self.assertEqual(te.method, "exact")
         self.assertEqual(te.confidence, "high")
-        self.assertEqual(te.total, 65000)  # 50000 + 10000 + 5000
-        expected_pct = round(65000 / DEFAULT_CONTEXT_WINDOW * 100, 1)
+        self.assertEqual(te.total, 65200)  # 50000 + 10000 + 5000 + 200(output)
+        expected_pct = round(65200 / DEFAULT_CONTEXT_WINDOW * 100, 1)
         self.assertEqual(te.context_pct, expected_pct)
 
     def test_heuristic_fallback(self):
@@ -277,7 +277,7 @@ class TestEstimateSessionTokens(unittest.TestCase):
             make_assistant_with_usage(1, "resp", input_tokens=100000, cache_creation=0, cache_read=0),
         ]
         te = estimate_session_tokens(messages)
-        self.assertEqual(te.context_pct, 50.0)  # 100K / 200K = 50%
+        self.assertEqual(te.context_pct, 50.1)  # (100K + 200 output) / 200K
 
 
 class TestQuickTokenEstimate(unittest.TestCase):
@@ -309,7 +309,7 @@ class TestQuickTokenEstimate(unittest.TestCase):
         path = self._write_jsonl(messages)
         try:
             result = quick_token_estimate(path)
-            self.assertEqual(result, 6500)  # 5000 + 1000 + 500
+            self.assertEqual(result, 6700)  # 5000 + 1000 + 500 + 200(output)
         finally:
             path.unlink()
 
@@ -365,7 +365,7 @@ class TestQuickTokenEstimate(unittest.TestCase):
         path = self._write_jsonl(messages)
         try:
             result = quick_token_estimate(path)
-            self.assertEqual(result, 8000)
+            self.assertEqual(result, 8300)  # 8000 + 300(output)
         finally:
             path.unlink()
 

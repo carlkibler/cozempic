@@ -10,6 +10,7 @@ from ..helpers import (
     content_block_bytes,
     get_content_blocks,
     get_msg_type,
+    is_protected,
     msg_bytes,
     set_content_blocks,
     text_of,
@@ -60,6 +61,8 @@ def strategy_http_spam(messages: list[Message], config: dict) -> StrategyResult:
             if run_end - run_start > 3:
                 for j in range(run_start + 1, run_end - 1):
                     rm_idx, rm_msg, rm_size = messages[j]
+                    if is_protected(rm_msg):
+                        continue
                     if get_msg_type(rm_msg) == "progress":
                         actions.append(PruneAction(
                             line_index=rm_idx,
@@ -96,6 +99,8 @@ def strategy_error_retry_collapse(messages: list[Message], config: dict) -> Stra
     tool_sequence: list[tuple[int, str, str, bool]] = []
 
     for pos, (idx, msg, size) in enumerate(messages):
+        if is_protected(msg):
+            continue
         for block in get_content_blocks(msg):
             if block.get("type") == "tool_use":
                 name = block.get("name", "")
@@ -162,6 +167,9 @@ def strategy_background_poll_collapse(messages: list[Message], config: dict) -> 
     i = 0
     while i < len(messages):
         idx, msg, size = messages[i]
+        if is_protected(msg):
+            i += 1
+            continue
         mtype = get_msg_type(msg)
 
         if mtype == "queue-operation" and msg.get("operation") in ("check", "poll"):
@@ -249,6 +257,8 @@ def strategy_document_dedup(messages: list[Message], config: dict) -> StrategyRe
     block_hashes: dict[str, list[tuple[int, int, int]]] = {}
 
     for pos, (idx, msg, size) in enumerate(messages):
+        if is_protected(msg):
+            continue
         blocks = get_content_blocks(msg)
         for bi, block in enumerate(blocks):
             text = text_of(block)
@@ -317,6 +327,8 @@ def strategy_mega_block_trim(messages: list[Message], config: dict) -> StrategyR
     replaced = 0
 
     for pos, (idx, msg, size) in enumerate(messages):
+        if is_protected(msg):
+            continue
         if get_msg_type(msg) in ("summary", "queue-operation"):
             continue
 
@@ -383,7 +395,7 @@ def strategy_mega_block_trim(messages: list[Message], config: dict) -> StrategyR
 @strategy("envelope-strip", "Strip redundant top-level fields (cwd, version, slug)", "aggressive", "2-4%")
 def strategy_envelope_strip(messages: list[Message], config: dict) -> StrategyResult:
     """Remove repetitive envelope fields that are constant across all messages."""
-    strip_candidates = {"cwd", "version", "gitBranch", "slug", "userType", "isSidechain"}
+    strip_candidates = {"cwd", "version", "gitBranch", "slug", "userType"}
 
     actions: list[PruneAction] = []
     total_orig = sum(b for _, _, b in messages)
@@ -411,7 +423,7 @@ def strategy_envelope_strip(messages: list[Message], config: dict) -> StrategyRe
         )
 
     for pos, (idx, msg, size) in enumerate(messages):
-        if pos == 0:
+        if pos == 0 or is_protected(msg):
             continue
 
         new_msg = copy.deepcopy(msg)
@@ -464,6 +476,8 @@ def strategy_tool_use_result_strip(messages: list[Message], config: dict) -> Str
     replaced = 0
 
     for idx, msg, size in messages:
+        if is_protected(msg):
+            continue
         if "toolUseResult" not in msg:
             continue
         new_msg = copy.deepcopy(msg)
@@ -511,6 +525,8 @@ def strategy_image_strip(messages: list[Message], config: dict) -> StrategyResul
     # Collect all (position, block_index) for image blocks across all messages
     image_locations: list[tuple[int, int]] = []  # (messages index, block index within content)
     for pos, (idx, msg, size) in enumerate(messages):
+        if is_protected(msg):
+            continue
         content = msg.get("message", {}).get("content", [])
         if not isinstance(content, list):
             continue

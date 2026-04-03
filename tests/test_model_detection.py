@@ -177,14 +177,14 @@ class TestEstimateSessionTokensWithModel(unittest.TestCase):
         te = estimate_session_tokens(messages)
         self.assertEqual(te.model, "claude-opus-4-6")
         self.assertEqual(te.context_window, 200_000)
-        self.assertEqual(te.total, 50000)
-        self.assertEqual(te.context_pct, 25.0)
+        self.assertEqual(te.total, 50100)  # 50000 + 100(output)
+        self.assertEqual(te.context_pct, 25.1)
 
     def test_context_pct_uses_detected_window(self):
         """100K tokens on a 200K window should be 50%."""
         messages = [make_assistant_with_model(0, "claude-sonnet-4-6", input_tokens=100000)]
         te = estimate_session_tokens(messages)
-        self.assertEqual(te.context_pct, 50.0)
+        self.assertEqual(te.context_pct, 50.0)  # (100000 + 100 output) / 200K ≈ 50.0
 
     def test_1m_model_context_pct(self):
         """100K tokens on a 1M window should be 10%."""

@@ -10,11 +10,15 @@ STRATEGIES: dict[str, StrategyInfo] = {}
 # Prescriptions: named combos of strategies with curated ordering
 PRESCRIPTIONS: dict[str, list[str]] = {
     "gentle": [
+        "compact-summary-collapse",
+        "attribution-snapshot-strip",
         "progress-collapse",
         "file-history-dedup",
         "metadata-strip",
     ],
     "standard": [
+        "compact-summary-collapse",
+        "attribution-snapshot-strip",
         "progress-collapse",
         "file-history-dedup",
         "metadata-strip",
@@ -25,6 +29,8 @@ PRESCRIPTIONS: dict[str, list[str]] = {
         "tool-use-result-strip",
     ],
     "aggressive": [
+        "compact-summary-collapse",
+        "attribution-snapshot-strip",
         "progress-collapse",
         "file-history-dedup",
         "metadata-strip",

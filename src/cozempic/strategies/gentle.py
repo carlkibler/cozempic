@@ -4,9 +4,102 @@ from __future__ import annotations
 
 import copy
 
-from ..helpers import get_msg_type, msg_bytes
+from ..helpers import get_msg_type, is_protected, msg_bytes
 from ..registry import strategy
 from ..types import Message, PruneAction, StrategyResult
+
+
+def _no_op(name: str, total_orig: int, summary: str) -> StrategyResult:
+    """Return a no-op StrategyResult."""
+    return StrategyResult(name, [], total_orig, 0, 0, 0, 0, summary)
+
+
+@strategy("compact-summary-collapse", "Remove all pre-compaction messages (already in the summary)", "gentle", "85-95%")
+def strategy_compact_summary_collapse(messages: list[Message], config: dict) -> StrategyResult:
+    """Remove everything before the last compact_boundary.
+
+    After compaction, all pre-boundary messages are already summarized in the
+    isCompactSummary message. Claude Code discards them at load time for files
+    >5MB; this strategy does it proactively at any size.
+
+    Safety: skips if hasPreservedSegment is True (boundary preserves pre-content).
+    Keeps metadata singletons that only appear before the boundary (re-anchor).
+    """
+    total_orig = sum(b for _, _, b in messages)
+
+    # Find last compact_boundary
+    last_boundary_pos = -1
+    last_boundary_msg = None
+    for pos, (idx, msg, _) in enumerate(messages):
+        if msg.get("type") == "system" and msg.get("subtype") == "compact_boundary":
+            last_boundary_pos = pos
+            last_boundary_msg = msg
+
+    if last_boundary_pos < 0:
+        return _no_op("compact-summary-collapse", total_orig, "No compact_boundary found")
+
+    if last_boundary_msg.get("hasPreservedSegment"):
+        return _no_op("compact-summary-collapse", total_orig, "Skipped (hasPreservedSegment=True)")
+
+    # Metadata singletons: keep if they only appear before the boundary
+    _META_TYPES = {"last-prompt", "pr-link", "custom-title", "ai-title", "attribution-snapshot"}
+    post_meta_types = {msg.get("type") for _, msg, _ in messages[last_boundary_pos:]}
+
+    actions: list[PruneAction] = []
+    total_pruned = 0
+    removed = 0
+
+    for pos, (idx, msg, size) in enumerate(messages[:last_boundary_pos]):
+        if is_protected(msg):
+            continue
+        # Keep metadata singletons that won't appear after boundary
+        if msg.get("type") in _META_TYPES and msg.get("type") not in post_meta_types:
+            continue
+        actions.append(PruneAction(
+            line_index=idx, action="remove",
+            reason="compact-summary-collapse (pre-boundary, already summarized)",
+            original_bytes=size, pruned_bytes=0,
+        ))
+        total_pruned += size
+        removed += 1
+
+    return StrategyResult(
+        strategy_name="compact-summary-collapse",
+        actions=actions,
+        original_bytes=total_orig,
+        pruned_bytes=total_pruned,
+        messages_affected=removed,
+        messages_removed=removed,
+        messages_replaced=0,
+        summary=f"Collapsed {removed} pre-compaction messages ({total_pruned / 1024:.0f}KB)",
+    )
+
+
+@strategy("attribution-snapshot-strip", "Strip attribution-snapshot metadata entries", "gentle", "0-2%")
+def strategy_attribution_snapshot_strip(messages: list[Message], config: dict) -> StrategyResult:
+    """Remove AttributionSnapshotMessage entries — pure UI metadata, never sent to API."""
+    actions: list[PruneAction] = []
+    total_orig = sum(b for _, _, b in messages)
+    total_pruned = 0
+
+    for idx, msg, size in messages:
+        if is_protected(msg):
+            continue
+        if msg.get("type") == "attribution-snapshot":
+            actions.append(PruneAction(idx, "remove", "attribution-snapshot-strip", size, 0))
+            total_pruned += size
+
+    removed = len(actions)
+    return StrategyResult(
+        strategy_name="attribution-snapshot-strip",
+        actions=actions,
+        original_bytes=total_orig,
+        pruned_bytes=total_pruned,
+        messages_affected=removed,
+        messages_removed=removed,
+        messages_replaced=0,
+        summary=f"Stripped {removed} attribution-snapshot entries",
+    )
 
 
 @strategy("progress-collapse", "Collapse consecutive and isolated progress tick messages", "gentle", "40-48%")
@@ -23,10 +116,10 @@ def strategy_progress_collapse(messages: list[Message], config: dict) -> Strateg
     i = 0
     while i < len(messages):
         idx, msg, size = messages[i]
-        if get_msg_type(msg) == "progress":
+        if get_msg_type(msg) == "progress" and not is_protected(msg):
             run_start = i
             run_end = i + 1
-            while run_end < len(messages) and get_msg_type(messages[run_end][1]) == "progress":
+            while run_end < len(messages) and get_msg_type(messages[run_end][1]) == "progress" and not is_protected(messages[run_end][1]):
                 run_end += 1
 
             run_length = run_end - run_start
@@ -78,7 +171,7 @@ def strategy_file_history_dedup(messages: list[Message], config: dict) -> Strate
 
     snapshots: dict[str, list[int]] = {}
     for pos, (idx, msg, size) in enumerate(messages):
-        if get_msg_type(msg) == "file-history-snapshot":
+        if get_msg_type(msg) == "file-history-snapshot" and not is_protected(msg):
             mid = msg.get("messageId", "")
             if mid:
                 snapshots.setdefault(mid, []).append(pos)
@@ -100,7 +193,7 @@ def strategy_file_history_dedup(messages: list[Message], config: dict) -> Strate
     current_run: list[int] = []
     update_runs: list[list[int]] = []
     for pos, (idx, msg, size) in enumerate(messages):
-        if get_msg_type(msg) == "file-history-snapshot" and msg.get("isSnapshotUpdate"):
+        if get_msg_type(msg) == "file-history-snapshot" and msg.get("isSnapshotUpdate") and not is_protected(msg):
             current_run.append(pos)
         else:
             if len(current_run) > 1:
@@ -155,6 +248,8 @@ def strategy_metadata_strip(messages: list[Message], config: dict) -> StrategyRe
             exact_tokens_before += usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
 
     for pos, (idx, msg, size) in enumerate(messages):
+        if is_protected(msg):
+            continue
         new_msg = copy.deepcopy(msg)
         changed = False
 

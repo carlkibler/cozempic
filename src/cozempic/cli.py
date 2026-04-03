@@ -692,6 +692,39 @@ def cmd_formulary(args):
     print()
 
 
+def cmd_digest(args):
+    from .digest import clear_digest_store, show_digest, update_digest
+    from .session import find_current_session, load_messages
+
+    action = getattr(args, "digest_action", "show") or "show"
+
+    if action == "show":
+        print(show_digest())
+
+    elif action == "update":
+        cwd = getattr(args, "cwd", None) or os.getcwd()
+        session_path = getattr(args, "session", None)
+        if not session_path:
+            sess = find_current_session(cwd)
+            if not sess:
+                print("No active session found.")
+                sys.exit(1)
+            session_path = sess["path"]
+            session_id = sess.get("session_id", "")
+        else:
+            session_id = ""
+
+        messages = load_messages(session_path)
+        added, upvoted, rejected = update_digest(
+            messages, project_dir=cwd, session_id=session_id,
+        )
+        print(f"Digest updated: {added} new, {upvoted} reinforced, {rejected} rejected.")
+
+    elif action == "clear":
+        clear_digest_store()
+        print("Behavioral digest cleared.")
+
+
 # ─── Parser ───────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -784,12 +817,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_comp = sub.add_parser("completions", help="Generate shell completion script")
     p_comp.add_argument("shell", choices=["bash", "zsh"], help="Shell type")
 
+    # digest
+    p_digest = sub.add_parser("digest", help="Manage behavioral correction rules")
+    p_digest.add_argument("digest_action", nargs="?", default="show",
+                          choices=["show", "update", "clear"],
+                          help="Action: show (default), update, clear")
+    p_digest.add_argument("--session", help="Session ID or path")
+    p_digest.add_argument("--cwd", help="Working directory (default: current)")
+
     return parser
 
 
 _SUBCOMMANDS = {
     "list", "current", "diagnose", "treat", "strategy", "reload",
     "checkpoint", "post-compact", "guard", "init", "doctor", "formulary", "completions",
+    "digest",
 }
 
 
@@ -889,6 +931,7 @@ def main():
         "doctor": cmd_doctor,
         "formulary": cmd_formulary,
         "completions": cmd_completions,
+        "digest": cmd_digest,
     }
 
     commands[args.command](args)

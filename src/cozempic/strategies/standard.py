@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 
-from ..helpers import get_content_blocks, get_msg_type, msg_bytes, set_content_blocks, text_of
+from ..helpers import get_content_blocks, get_msg_type, is_protected, msg_bytes, set_content_blocks, text_of
 from ..registry import strategy
 from ..types import Message, PruneAction, StrategyResult
 
@@ -27,6 +27,8 @@ def strategy_thinking_blocks(messages: list[Message], config: dict) -> StrategyR
     replaced = 0
 
     for pos, (idx, msg, size) in enumerate(messages):
+        if is_protected(msg):
+            continue
         if get_msg_type(msg) != "assistant":
             continue
 
@@ -98,7 +100,16 @@ def strategy_tool_output_trim(messages: list[Message], config: dict) -> Strategy
     total_pruned = 0
     replaced = 0
 
+    # T2.3: Collect tool IDs already summarized by microcompact — don't trim those
+    compacted_tool_ids: set[str] = set()
+    for _, msg, _ in messages:
+        if msg.get("type") == "system" and msg.get("subtype") == "microcompact_boundary":
+            for tid in msg.get("compactedToolIds", []):
+                compacted_tool_ids.add(tid)
+
     for pos, (idx, msg, size) in enumerate(messages):
+        if is_protected(msg):
+            continue
         blocks = get_content_blocks(msg)
         if not blocks:
             continue
@@ -107,6 +118,11 @@ def strategy_tool_output_trim(messages: list[Message], config: dict) -> Strategy
         changed = False
         for block in blocks:
             if block.get("type") == "tool_result":
+                # Skip tool results already microcompacted
+                tool_use_id = block.get("tool_use_id", "")
+                if tool_use_id and tool_use_id in compacted_tool_ids:
+                    new_blocks.append(block)
+                    continue
                 content = block.get("content", "")
                 if isinstance(content, str):
                     content_bytes = len(content.encode("utf-8"))
@@ -185,6 +201,8 @@ def strategy_stale_reads(messages: list[Message], config: dict) -> StrategyResul
     file_events: dict[str, list[tuple[int, str, int]]] = {}
 
     for pos, (idx, msg, size) in enumerate(messages):
+        if is_protected(msg):
+            continue
         for block in get_content_blocks(msg):
             if block.get("type") == "tool_use":
                 tool_name = block.get("name", "")
@@ -270,6 +288,8 @@ def strategy_system_reminder_dedup(messages: list[Message], config: dict) -> Str
     seen_hashes: set[str] = set()
 
     for pos, (idx, msg, size) in enumerate(messages):
+        if is_protected(msg):
+            continue
         blocks = get_content_blocks(msg)
         if not blocks:
             continue
