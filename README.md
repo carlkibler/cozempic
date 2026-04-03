@@ -1,6 +1,6 @@
 # Cozempic
 
-![Downloads](https://img.shields.io/badge/downloads-20k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.4.0-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Downloads](https://img.shields.io/badge/downloads-20k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.4.1-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 Context cleaning for [Claude Code](https://claude.ai/code) — **remove the bloat, keep everything that matters, protect Agent Teams from context loss**.
 
