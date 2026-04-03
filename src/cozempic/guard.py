@@ -384,7 +384,15 @@ def start_guard(
             if threshold_tokens is not None or soft_threshold_tokens is not None:
                 current_tokens = quick_token_estimate(session_path)
 
-            # ── Phase 4: HARD2 (80%) — aggressive + reload (emergency) ──
+            # Detect if agents are actively running (reload would kill them)
+            agents_active = False
+            if state and not state.is_empty():
+                agents_active = any(
+                    s.status in ("running", "unknown")
+                    for s in state.subagents
+                )
+
+            # ── Phase 4: HARD2 (80%) — aggressive + reload (ALWAYS, even with agents) ──
             hard2_tokens_hit = (
                 hard2_threshold_tokens is not None
                 and current_tokens is not None
@@ -394,6 +402,8 @@ def start_guard(
                 prune_count += 1
                 reason = f"{current_tokens:,} tokens >= {hard2_threshold_tokens:,} (80%)"
                 print(f"  [{_now()}] EMERGENCY THRESHOLD (80%): {reason}")
+                if agents_active:
+                    print(f"  WARNING: Agents are active but compaction is imminent — reload required.")
                 print(f"  Aggressive prune + reload (cycle #{prune_count})...")
 
                 result = guard_prune_cycle(
@@ -414,23 +424,38 @@ def start_guard(
                     print(f"  Team '{result['team_name']}' state preserved ({result['team_messages']} messages)")
                 print()
 
-            # ── Phase 3: HARD1 (55%) — standard + reload ─────────────
+            # ── Phase 3: HARD1 (55%) — standard + reload (SKIP reload if agents active) ──
             elif (threshold_tokens is not None
                   and current_tokens is not None
                   and current_tokens >= threshold_tokens):
                 prune_count += 1
                 reason = f"{current_tokens:,} tokens >= {threshold_tokens:,} (55%)"
-                print(f"  [{_now()}] HARD THRESHOLD (55%): {reason}")
-                print(f"  Standard prune + reload (cycle #{prune_count})...")
 
-                result = guard_prune_cycle(
-                    session_path=session_path,
-                    rx_name=rx_name,
-                    config=config,
-                    auto_reload=auto_reload,
-                    cwd=cwd or os.getcwd(),
-                    session_id=sess["session_id"],
-                )
+                if agents_active:
+                    # Agents running — prune file only, no reload (don't kill active work)
+                    print(f"  [{_now()}] HARD THRESHOLD (55%): {reason}")
+                    print(f"  Agents active — prune file only, deferring reload (cycle #{prune_count})...")
+
+                    result = guard_prune_cycle(
+                        session_path=session_path,
+                        rx_name=rx_name,
+                        config=config,
+                        auto_reload=False,  # Don't reload — agents are working
+                        cwd=cwd or os.getcwd(),
+                        session_id=sess["session_id"],
+                    )
+                else:
+                    print(f"  [{_now()}] HARD THRESHOLD (55%): {reason}")
+                    print(f"  Standard prune + reload (cycle #{prune_count})...")
+
+                    result = guard_prune_cycle(
+                        session_path=session_path,
+                        rx_name=rx_name,
+                        config=config,
+                        auto_reload=auto_reload,
+                        cwd=cwd or os.getcwd(),
+                        session_id=sess["session_id"],
+                    )
 
                 if result.get("reloading"):
                     print(f"  Reload triggered. Guard exiting.")
