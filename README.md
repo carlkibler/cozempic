@@ -1,6 +1,6 @@
 # Cozempic
 
-![Downloads](https://img.shields.io/badge/downloads-20k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.6.2-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Downloads](https://img.shields.io/badge/downloads-20k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.6.3-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 **20,000+ power users** trust Cozempic to keep their Claude Code sessions lean.
 
@@ -118,14 +118,20 @@ The guard daemon monitors your session and prunes automatically:
 cozempic guard --daemon
 ```
 
-**Proactive polling loop** (every 30s):
-1. **Checkpoint** — saves team state to disk (always recoverable)
-2. **Soft prune** (at 45% context) — gentle prescription, no reload
-3. **Hard prune** (at 75% context) — full prescription + optional reload
+**4-tier proactive pruning** (every 30s):
+
+| Tier | Threshold | Action | Reload? |
+|------|-----------|--------|---------|
+| Soft | 25% | gentle file cleanup | No |
+| Hard | 55% | standard prune | Yes (deferred if agents active) |
+| Emergency | 80% | aggressive prune | Yes (forced) |
+| User | 90% | manual aggressive | Yes |
 
 **Reactive overflow recovery** — kqueue/polling file watcher detects inbox-flood overflow within milliseconds, auto-prunes with escalating prescriptions, circuit breaker prevents loops.
 
-**Token thresholds auto-detect** — 200K and 1M models detected automatically from session data. Override with `COZEMPIC_CONTEXT_WINDOW=1000000` if needed.
+**tmux/screen** — reload resumes in the same pane via `send-keys`. Plain terminals open a new window.
+
+**Token thresholds auto-detect** — 200K and 1M models detected automatically. Override with `COZEMPIC_CONTEXT_WINDOW=200000` for Pro plan.
 
 ## Behavioral Digest
 
@@ -239,6 +245,14 @@ After `cozempic init`, these hooks are wired automatically:
 ```
 
 ## Changelog
+
+### v1.6.x
+
+- **4-tier pruning**: soft (25%, no reload) → hard (55%, reload) → emergency (80%, aggressive reload) → user (90%, manual)
+- **Agent-aware reload**: defers reload at 25%/55% when agents are running, forces at 80%
+- **Same-terminal resume**: tmux/screen users get `/exit` + `claude --resume` in the same pane
+- **Clean messaging**: only shows strategies that did something, 1-line hook status output
+- **1M default**: Opus/Sonnet 4.5/4.6 default to 1M context (CC doesn't use `[1m]` suffix)
 
 ### v1.5.0
 
