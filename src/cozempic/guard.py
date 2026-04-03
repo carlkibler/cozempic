@@ -475,7 +475,7 @@ def start_guard(
                     consecutive_empty_hard_prunes = 0
                 print()
 
-            # ── Phase 2: SOFT (25%) — gentle, no reload ──────────────
+            # ── Phase 2: SOFT (25%) — gentle + reload (skip reload if agents active) ──
             else:
                 hard_bytes_hit = current_size >= hard_threshold_bytes
                 soft_bytes_hit = current_size >= soft_threshold_bytes
@@ -488,17 +488,28 @@ def start_guard(
                     soft_prune_count += 1
                     size_mb = current_size / 1024 / 1024
                     reason = f"{current_tokens:,} tokens >= {soft_threshold_tokens:,} (25%)" if soft_tokens_hit else f"{size_mb:.1f}MB"
-                    print(f"  [{_now()}] SOFT THRESHOLD (25%): {reason}")
-                    print(f"  Gentle prune, no reload (cycle #{soft_prune_count})...")
+
+                    if agents_active:
+                        print(f"  [{_now()}] SOFT THRESHOLD (25%): {reason}")
+                        print(f"  Agents active — gentle prune, deferring reload (cycle #{soft_prune_count})...")
+                        soft_reload = False
+                    else:
+                        print(f"  [{_now()}] SOFT THRESHOLD (25%): {reason}")
+                        print(f"  Gentle prune + reload (cycle #{soft_prune_count})...")
+                        soft_reload = auto_reload
 
                     result = guard_prune_cycle(
                         session_path=session_path,
                         rx_name="gentle",
                         config=config,
-                        auto_reload=False,
+                        auto_reload=soft_reload,
                         cwd=cwd or os.getcwd(),
                         session_id=sess["session_id"],
                     )
+
+                    if result.get("reloading"):
+                        print(f"  Reload triggered. Guard exiting.")
+                        break
 
                     print(f"  Trimmed: {_fmt_prune_result(result)}")
                     if result.get("team_name"):
