@@ -59,7 +59,8 @@ def diagnose_current() -> str:
     if te:
         tok_str = f"{te.total / 1000:.1f}K" if te.total >= 1000 else str(te.total)
         lines.append(f"Tokens: {tok_str} ({te.method})")
-        lines.append(f"Context: {te.context_pct:.0f}% of 200K window")
+        window_str = f"{te.context_window // 1000}K" if te.context_window < 1_000_000 else f"{te.context_window // 1_000_000}M"
+        lines.append(f"Context: {te.context_pct:.0f}% of {window_str} window")
     lines.append("")
 
     lines.append("Vital Signs:")
@@ -87,20 +88,25 @@ def estimate_tokens() -> str:
 
     Fast check — reads only the tail of the session file.
     """
-    from cozempic.session import find_current_session
-    from cozempic.tokens import quick_token_estimate, DEFAULT_CONTEXT_WINDOW
+    from cozempic.session import find_current_session, load_messages
+    from cozempic.tokens import quick_token_estimate, detect_context_window
 
     sess = find_current_session()
     if not sess:
         return "Could not detect current session."
 
-    tok = quick_token_estimate(sess["path"])
+    # Detect actual context window from session model
+    messages = load_messages(sess["path"])
+    context_window = detect_context_window(messages)
+    window_str = f"{context_window // 1000}K" if context_window < 1_000_000 else f"{context_window // 1_000_000}M"
+
+    tok = quick_token_estimate(sess["path"], context_window=context_window)
     if tok is None:
         return f"Session: {sess['session_id'][:36]}\nSize: {sess['size'] / 1024:.1f}KB\nTokens: unable to estimate"
 
-    pct = round(tok / DEFAULT_CONTEXT_WINDOW * 100, 1)
+    pct = round(tok / context_window * 100, 1)
     tok_str = f"{tok / 1000:.1f}K" if tok >= 1000 else str(tok)
-    return f"Session: {sess['session_id'][:36]}\nTokens: {tok_str}\nContext: {pct}% of 200K window"
+    return f"Session: {sess['session_id'][:36]}\nTokens: {tok_str}\nContext: {pct}% of {window_str} window"
 
 
 @mcp.tool()
