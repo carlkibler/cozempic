@@ -106,25 +106,16 @@ def print_diagnosis(diag: dict, path: Path):
 
 
 def print_strategy_result(sr: StrategyResult, total_bytes: int):
+    """Print a single strategy result — only called for strategies that did something."""
     saved = sum(a.original_bytes - a.pruned_bytes for a in sr.actions) if sr.actions else 0
-    pct = fmt_pct(saved, total_bytes)
-
-    detail_parts = []
-    if sr.messages_removed:
-        detail_parts.append(f"{sr.messages_removed} removed")
-    if sr.messages_replaced:
-        detail_parts.append(f"{sr.messages_replaced} modified")
-    detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
-
-    print(f"    {sr.strategy_name:<30} {fmt_bytes(saved):>10} saved  ({pct}){detail}  {sr.summary}")
+    affected = sr.messages_removed + sr.messages_replaced
+    print(f"    {sr.strategy_name:<28} {fmt_bytes(saved):>8}  {affected:>4} msgs")
 
 
 def print_prescription_result(pr: PrescriptionResult):
     saved = pr.original_total_bytes - pr.final_total_bytes
-    removed = pr.original_message_count - pr.final_message_count
-    total_replaced = sum(sr.messages_replaced for sr in pr.strategy_results)
 
-    print(f"\n  Prescription: {pr.prescription_name}")
+    print(f"\n  Cozempic — {pr.prescription_name} prescription\n")
 
     if pr.original_tokens is not None and pr.final_tokens is not None:
         tok_saved = pr.original_tokens - pr.final_tokens
@@ -133,20 +124,22 @@ def print_prescription_result(pr: PrescriptionResult):
         context_window = pr.context_window or DEFAULT_CONTEXT_WINDOW
         after_pct = round(pr.final_tokens / context_window * 100, 1)
         window_str = fmt_tokens(context_window)
-        print(f"  Before: {fmt_tokens(pr.original_tokens)} tokens ({fmt_bytes(pr.original_total_bytes)}, {pr.original_message_count} messages)")
-        print(f"  After:  {fmt_tokens(pr.final_tokens)} tokens ({fmt_bytes(pr.final_total_bytes)}, {pr.final_message_count} messages)")
-        print(f"  Freed:  {fmt_tokens(tok_saved)} tokens ({tok_pct}) — {fmt_bytes(saved)}, {removed} removed, {total_replaced} modified")
-        print(f"  Context: {fmt_context_bar(after_pct)} of {window_str}{f' ({pr.model})' if pr.model else ''}")
+        print(f"  Before   {fmt_tokens(pr.original_tokens):>8} tokens  {fmt_bytes(pr.original_total_bytes):>8}  {pr.original_message_count:,} messages")
+        print(f"  After    {fmt_tokens(pr.final_tokens):>8} tokens  {fmt_bytes(pr.final_total_bytes):>8}  {pr.final_message_count:,} messages")
+        print(f"  Saved    {fmt_tokens(tok_saved):>8} tokens ({tok_pct})  {fmt_bytes(saved)} freed")
+        print(f"  Context  {fmt_context_bar(after_pct)} of {window_str}")
     else:
         byte_pct = fmt_pct(saved, pr.original_total_bytes)
-        print(f"  Before: {fmt_bytes(pr.original_total_bytes)} ({pr.original_message_count} messages)")
-        print(f"  After:  {fmt_bytes(pr.final_total_bytes)} ({pr.final_message_count} messages)")
-        print(f"  Saved:  {fmt_bytes(saved)} ({byte_pct}) — {removed} removed, {total_replaced} modified")
+        print(f"  Before   {fmt_bytes(pr.original_total_bytes):>8}  {pr.original_message_count:,} messages")
+        print(f"  After    {fmt_bytes(pr.final_total_bytes):>8}  {pr.final_message_count:,} messages")
+        print(f"  Saved    {fmt_bytes(saved):>8} ({byte_pct})")
 
-    print()
-    print("  Strategy Results:")
-    for sr in pr.strategy_results:
-        print_strategy_result(sr, pr.original_total_bytes)
+    # Only show strategies that actually did something
+    active = [sr for sr in pr.strategy_results if sr.actions]
+    if active:
+        print(f"\n  What changed:")
+        for sr in sorted(active, key=lambda s: sum(a.original_bytes - a.pruned_bytes for a in s.actions), reverse=True):
+            print_strategy_result(sr, pr.original_total_bytes)
     print()
 
 
@@ -290,12 +283,12 @@ def cmd_treat(args):
 
     if args.execute:
         backup = save_messages(path, new_messages, create_backup=True)
-        print(f"  Treatment applied to {path}")
+        print(f"  Applied to {path}")
         if backup:
             print(f"  Backup: {backup}")
         print(f"  Final size: {fmt_bytes(final_bytes)}")
     else:
-        print("  DRY RUN — no changes made. Use --execute to apply.")
+        print("  Dry run — pass --execute to apply.")
     print()
 
 
@@ -337,7 +330,7 @@ def cmd_strategy(args):
         if backup:
             print(f"  Backup: {backup}")
     else:
-        print("  DRY RUN — no changes made. Use --execute to apply.")
+        print("  Dry run — pass --execute to apply.")
     print()
 
 
@@ -404,7 +397,7 @@ def cmd_reload(args):
     print_prescription_result(pr)
 
     backup = save_messages(path, new_messages, create_backup=True)
-    print(f"  Treatment applied to {path}")
+    print(f"  Applied to {path}")
     if backup:
         print(f"  Backup: {backup}")
     print(f"  Final size: {fmt_bytes(final_bytes)}")
@@ -435,22 +428,21 @@ def cmd_reload(args):
         import subprocess as sp
         sp.run(["tmux", "send-keys", *(["-t", pane] if pane else []), "/exit", "Enter"],
                capture_output=True, timeout=5)
-        print(f"  Sent /exit to tmux pane. Resuming automatically...")
+        print(f"  Resuming with optimized context...")
     elif term_env == "screen":
         screen_session = os.environ.get("STY", "")
         import subprocess as sp
         sp.run(["screen", "-S", screen_session, "-X", "stuff", "/exit\n"],
                capture_output=True, timeout=5)
-        print(f"  Sent /exit to screen session. Resuming automatically...")
+        print(f"  Resuming with optimized context...")
     elif term_env == "plain" and platform.system() == "Darwin":
         import subprocess as sp
         sp.run(["osascript", "-e",
                 'tell application "System Events" to keystroke "/exit" & return'],
                capture_output=True, timeout=5)
-        print(f"  Sent /exit via keystrokes. Resuming automatically...")
+        print(f"  Resuming with optimized context...")
     else:
-        print(f"  Watcher spawned (watching Claude PID {claude_pid}).")
-        print(f"  Type /exit to trigger the resume.")
+        print(f"  Type /exit to resume with optimized context.")
     print()
 
 
