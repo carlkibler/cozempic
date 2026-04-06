@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -57,16 +58,61 @@ def _mark_checked() -> None:
 
 
 def _do_upgrade(latest: str) -> bool:
-    """Run pip install cozempic==<latest>. Returns True on success."""
+    """Try to upgrade cozempic. Tries uv first (fast, common), then pip."""
+    # Try uv pip install first (works in uv-managed environments)
+    if shutil.which("uv"):
+        try:
+            result = subprocess.run(
+                ["uv", "pip", "install", f"cozempic=={latest}", "--quiet"],
+                capture_output=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+    # Try pip via sys.executable (works in pip-managed venvs)
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", f"cozempic=={latest}", "--quiet", "--disable-pip-version-check"],
+            [sys.executable, "-m", "pip", "install", f"cozempic=={latest}",
+             "--quiet", "--disable-pip-version-check"],
             capture_output=True,
             timeout=60,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
     except Exception:
-        return False
+        pass
+
+    # Try bare pip (works when pip is on PATH but not in current venv)
+    if shutil.which("pip"):
+        try:
+            result = subprocess.run(
+                ["pip", "install", f"cozempic=={latest}",
+                 "--quiet", "--disable-pip-version-check"],
+                capture_output=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+    # Try pipx upgrade (for pipx-installed users)
+    if shutil.which("pipx"):
+        try:
+            result = subprocess.run(
+                ["pipx", "upgrade", "cozempic"],
+                capture_output=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+    return False
 
 
 def ping_install_if_new() -> None:
@@ -90,7 +136,6 @@ def maybe_auto_update(force: bool = False, silent: bool = False) -> None:
     """Check PyPI and auto-update cozempic if a newer version is available.
 
     Throttled to one check per 24 hours. No-ops silently on network failures.
-    Skips when stdout is not a TTY unless force=True (used by guard/MCP startup).
 
     Args:
         force: Bypass the TTY check (for guard daemon and MCP server startup).
@@ -100,8 +145,8 @@ def maybe_auto_update(force: bool = False, silent: bool = False) -> None:
     """
     if os.environ.get("COZEMPIC_NO_AUTO_UPDATE"):
         return
-    if not force and not sys.stdout.isatty():
-        return
+    # Removed TTY check — auto-update should work from hooks, daemons, and CLI.
+    # The 24h throttle and silent mode are sufficient controls.
     if not _should_check():
         return
 
@@ -114,15 +159,14 @@ def maybe_auto_update(force: bool = False, silent: bool = False) -> None:
         return
 
     if not silent:
-        print(f"  Updating cozempic {__version__} → {latest}...", flush=True)
+        print(f"  Cozempic: updating {__version__} → {latest}...", flush=True)
     if _do_upgrade(latest):
         try:
             urlopen(Request(_COUNTER_URL, headers={"User-Agent": f"cozempic/{latest}"}), timeout=3)
         except Exception:
             pass
         if not silent:
-            print(f"  Updated to v{latest}.", flush=True)
-            print(f"  Restart cozempic to use the new version.", flush=True)
+            print(f"  Cozempic: updated to v{latest}.", flush=True)
     else:
         if not silent:
-            print(f"  Auto-update failed. Run: pip install --upgrade cozempic", flush=True)
+            print(f"  Cozempic: auto-update failed. Run: pip install --upgrade cozempic", flush=True)

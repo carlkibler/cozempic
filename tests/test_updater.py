@@ -58,14 +58,14 @@ class TestMaybeAutoUpdate(unittest.TestCase):
                 maybe_auto_update()
                 mock_check.assert_not_called()
 
-    def test_skips_when_not_tty(self):
-        """No update check when stdout is not a TTY (piped/CI)."""
+    def test_works_without_tty(self):
+        """Auto-update should work even without TTY (hooks, daemons)."""
         with patch("sys.stdout") as mock_stdout:
             mock_stdout.isatty.return_value = False
-            with patch("cozempic.updater._should_check") as mock_check:
+            with patch("cozempic.updater._should_check", return_value=False) as mock_check:
                 from cozempic.updater import maybe_auto_update
                 maybe_auto_update()
-                mock_check.assert_not_called()
+                mock_check.assert_called()  # Should still check (TTY no longer blocks)
 
     def test_skips_when_already_checked(self):
         with patch("sys.stdout") as mock_stdout:
@@ -111,7 +111,7 @@ class TestMaybeAutoUpdate(unittest.TestCase):
                 from cozempic.updater import maybe_auto_update
                 maybe_auto_update()
                 printed = " ".join(str(a) for call in mock_print.call_args_list for a in call[0])
-                self.assertIn("Auto-update failed", printed)
+                self.assertIn("auto-update failed", printed)
 
     def test_no_op_when_pypi_unreachable(self):
         with patch("sys.stdout") as mock_stdout:
