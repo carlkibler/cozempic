@@ -4,6 +4,7 @@
       "command": "uv",
       "args": [
         "run",
+        "--upgrade",
         "--with", "fastmcp",
         "--with", "cozempic",
         "python",
