@@ -198,6 +198,7 @@ cozempic checkpoint [--show]                Save team state to disk
 cozempic guard [--daemon]                   Start guard (auto-starts via hook)
 cozempic doctor [--fix]                     Check for known issues
 cozempic digest [show|update|clear|flush|recover|inject]
+cozempic self-update                        Upgrade to latest version from PyPI
 cozempic formulary                          Show all strategies & prescriptions
 ```
 
@@ -249,10 +250,13 @@ After `cozempic init`, these hooks are wired automatically:
 ### v1.6.x
 
 - **4-tier pruning**: soft (25%, no reload) → hard (55%, reload) → emergency (80%, aggressive reload) → user (90%, manual)
-- **Agent-aware reload**: defers reload at 25%/55% when agents are running, forces at 80%
+- **Agent-aware reload**: defers reload at 55% when agents are running, forces at 80%
 - **Same-terminal resume**: tmux/screen users get `/exit` + `claude --resume` in the same pane
 - **Clean messaging**: only shows strategies that did something, 1-line hook status output
 - **1M default**: Opus/Sonnet 4.5/4.6 default to 1M context (CC doesn't use `[1m]` suffix)
+- **Auto-upgrade everywhere**: SessionStart hook backgrounds `pip install --upgrade cozempic` on every session. MCP/plugin use `uv run --upgrade`. npm install.js always upgrades.
+- **`cozempic self-update`**: force-upgrade from PyPI regardless of install method (pip, uv, editable, clone)
+- **Auto-updater fixed**: removed TTY check (was blocking hook-triggered updates), tries uv → pip → pipx
 
 ### v1.5.0
 
