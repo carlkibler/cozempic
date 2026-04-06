@@ -29,6 +29,15 @@
             "command": "cozempic checkpoint 2>/dev/null || true"
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cozempic remind || true"
+          }
+        ]
       }
     ],
     "PreCompact": [

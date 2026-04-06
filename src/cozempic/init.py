@@ -57,6 +57,15 @@ COZEMPIC_HOOKS = {
                 }
             ],
         },
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "cozempic remind || true",
+                }
+            ],
+        },
     ],
     "PreCompact": [
         {

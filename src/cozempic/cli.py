@@ -694,6 +694,65 @@ def cmd_self_update(args):
         sys.exit(1)
 
 
+def cmd_remind(args):
+    """Periodic rule reinforcement — outputs active digest rules to stderr.
+
+    Designed for PostToolUse hook. Counts tool calls via a counter file,
+    outputs rules every N calls (default 25). Stderr output appears in
+    Claude's context, keeping rules in the recency window.
+    """
+    interval = int(getattr(args, "interval", None) or 25)
+    counter_file = Path.home() / ".cozempic_remind_counter"
+
+    # Increment counter
+    try:
+        count = int(counter_file.read_text().strip()) if counter_file.exists() else 0
+    except (ValueError, OSError):
+        count = 0
+    count += 1
+    try:
+        counter_file.write_text(str(count))
+    except OSError:
+        pass
+
+    # Only output every N calls
+    if count % interval != 0:
+        return
+
+    # Collect rules: digest active rules + CLAUDE.md critical rules
+    lines = []
+
+    # 1. Active digest rules
+    from .digest import load_digest_store
+    store = load_digest_store()
+    active = store.active_rules()
+    if active:
+        for r in active[:5]:
+            lines.append(f"  [{r.id}|{r.scope}] {r.rule}")
+
+    # 2. Critical CLAUDE.md rules (grep for enforcement markers)
+    for candidate in ["CLAUDE.md", ".claude/CLAUDE.md"]:
+        p = Path(candidate)
+        if p.exists():
+            try:
+                for line in p.read_text(encoding="utf-8").splitlines():
+                    line_stripped = line.strip()
+                    if any(kw in line_stripped.upper() for kw in
+                           ["MUST NEVER", "NEVER ", "MUST ALWAYS", "CRITICAL:", "IMPORTANT:"]):
+                        if len(line_stripped) > 10 and not line_stripped.startswith("#"):
+                            lines.append(f"  {line_stripped[:120]}")
+                            if len(lines) >= 8:
+                                break
+            except OSError:
+                pass
+            break
+
+    if lines:
+        print(f"Cozempic behavioral rules (reminder #{count // interval}):", file=sys.stderr)
+        for line in lines[:8]:
+            print(line, file=sys.stderr)
+
+
 def cmd_completions(args):
     """Generate shell completion scripts."""
     from .completion import bash_completion, zsh_completion
@@ -802,7 +861,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 1.6.8")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.6.9")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")
@@ -890,6 +949,10 @@ def build_parser() -> argparse.ArgumentParser:
     # self-update
     sub.add_parser("self-update", help="Upgrade cozempic to the latest version from PyPI")
 
+    # remind
+    p_remind = sub.add_parser("remind", help="Output active behavioral rules (for PostToolUse hook)")
+    p_remind.add_argument("--interval", type=int, default=25, help="Output every N tool calls (default: 25)")
+
     # digest
     p_digest = sub.add_parser("digest", help="Manage behavioral correction rules")
     p_digest.add_argument("digest_action", nargs="?", default="show",
@@ -904,7 +967,7 @@ def build_parser() -> argparse.ArgumentParser:
 _SUBCOMMANDS = {
     "list", "current", "diagnose", "treat", "strategy", "reload",
     "checkpoint", "post-compact", "guard", "init", "doctor", "formulary", "completions",
-    "digest", "self-update",
+    "digest", "self-update", "remind",
 }
 
 
@@ -1006,6 +1069,7 @@ def main():
         "completions": cmd_completions,
         "digest": cmd_digest,
         "self-update": cmd_self_update,
+        "remind": cmd_remind,
     }
 
     commands[args.command](args)
