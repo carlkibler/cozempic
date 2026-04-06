@@ -442,7 +442,10 @@ def cmd_reload(args):
 
 def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = None, session_id: str | None = None):
     """Spawn a detached background process that waits for Claude to exit, then resumes."""
+    from .guard import _detect_skip_permissions
     resume_flag = f"--resume {session_id}" if session_id else "--resume"
+    if _detect_skip_permissions(claude_pid):
+        resume_flag = f"--dangerously-skip-permissions {resume_flag}"
 
     # SSH sessions can't open GUI terminals — tell the user to resume manually
     if is_ssh_session():
@@ -861,7 +864,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 1.6.9")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.6.10")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")

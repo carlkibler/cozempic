@@ -627,6 +627,18 @@ def guard_prune_cycle(
     return result
 
 
+def _detect_skip_permissions(pid: int) -> bool:
+    """Check if the Claude process was launched with --dangerously-skip-permissions."""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "args="],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "--dangerously-skip-permissions" in result.stdout
+    except Exception:
+        return False
+
+
 def _detect_terminal_env() -> str:
     """Detect the terminal environment: 'tmux', 'screen', 'ssh', or 'plain'."""
     if os.environ.get("TMUX"):
@@ -659,7 +671,12 @@ def _terminate_and_resume(claude_pid: int, project_dir: str, session_id: str | N
       3. SSH: skip terminate, print manual instructions
     """
     resume_flag = f"--resume {session_id}" if session_id else "--resume"
-    resume_cmd = f"claude {resume_flag}"
+
+    # Preserve --dangerously-skip-permissions if the current Claude has it
+    skip_perms = _detect_skip_permissions(claude_pid)
+    perms_flag = " --dangerously-skip-permissions" if skip_perms else ""
+
+    resume_cmd = f"claude{perms_flag} {resume_flag}"
     term_env = _detect_terminal_env()
     system = platform.system()
 
@@ -743,6 +760,9 @@ def _terminate_and_resume(claude_pid: int, project_dir: str, session_id: str | N
 def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | None = None):
     """Spawn a detached watcher that resumes Claude after exit."""
     resume_flag = f"--resume {session_id}" if session_id else "--resume"
+    skip_perms = _detect_skip_permissions(claude_pid)
+    if skip_perms:
+        resume_flag = f"--dangerously-skip-permissions {resume_flag}"
 
     # SSH sessions can't open GUI terminals — skip auto-resume
     if is_ssh_session():
