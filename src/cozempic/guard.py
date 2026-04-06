@@ -629,14 +629,51 @@ def guard_prune_cycle(
 
 def _detect_skip_permissions(pid: int) -> bool:
     """Check if the Claude process was launched with --dangerously-skip-permissions."""
+    flags = _detect_claude_flags(pid)
+    return "--dangerously-skip-permissions" in flags
+
+
+def _detect_claude_flags(pid: int) -> str:
+    """Extract CLI flags from the running Claude process.
+
+    Returns the flags portion of the command line (everything after 'claude'
+    but excluding --resume/--continue and the session ID).
+    """
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "args="],
             capture_output=True, text=True, timeout=5,
         )
-        return "--dangerously-skip-permissions" in result.stdout
+        args = result.stdout.strip()
+        if not args or "claude" not in args:
+            return ""
+
+        # Extract everything after "claude"
+        parts = args.split()
+        claude_idx = next((i for i, p in enumerate(parts) if p.endswith("claude")), -1)
+        if claude_idx < 0:
+            return ""
+
+        flags = parts[claude_idx + 1:]
+
+        # Remove resume/continue flags and session IDs (we'll add our own)
+        cleaned = []
+        skip_next = False
+        for f in flags:
+            if skip_next:
+                skip_next = False
+                continue
+            if f in ("--resume", "--continue", "-c"):
+                skip_next = True  # Skip the session ID that follows
+                continue
+            # Skip bare session ID args (UUID-like)
+            if len(f) >= 32 and "-" in f and not f.startswith("-"):
+                continue
+            cleaned.append(f)
+
+        return " ".join(cleaned)
     except Exception:
-        return False
+        return ""
 
 
 def _detect_terminal_env() -> str:
@@ -672,11 +709,9 @@ def _terminate_and_resume(claude_pid: int, project_dir: str, session_id: str | N
     """
     resume_flag = f"--resume {session_id}" if session_id else "--resume"
 
-    # Preserve --dangerously-skip-permissions if the current Claude has it
-    skip_perms = _detect_skip_permissions(claude_pid)
-    perms_flag = " --dangerously-skip-permissions" if skip_perms else ""
-
-    resume_cmd = f"claude{perms_flag} {resume_flag}"
+    # Preserve all CLI flags from the original Claude process
+    original_flags = _detect_claude_flags(claude_pid)
+    resume_cmd = f"claude {original_flags} {resume_flag}".replace("  ", " ").strip()
     term_env = _detect_terminal_env()
     system = platform.system()
 
@@ -760,9 +795,9 @@ def _terminate_and_resume(claude_pid: int, project_dir: str, session_id: str | N
 def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | None = None):
     """Spawn a detached watcher that resumes Claude after exit."""
     resume_flag = f"--resume {session_id}" if session_id else "--resume"
-    skip_perms = _detect_skip_permissions(claude_pid)
-    if skip_perms:
-        resume_flag = f"--dangerously-skip-permissions {resume_flag}"
+    original_flags = _detect_claude_flags(claude_pid)
+    if original_flags:
+        resume_flag = f"{original_flags} {resume_flag}"
 
     # SSH sessions can't open GUI terminals — skip auto-resume
     if is_ssh_session():
