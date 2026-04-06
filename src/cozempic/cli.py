@@ -672,6 +672,28 @@ def cmd_init(args):
     print()
 
 
+def cmd_self_update(args):
+    """Force-upgrade cozempic from PyPI regardless of install method."""
+    from .updater import _get_latest_version, _do_upgrade, _version_tuple
+    from . import __version__
+
+    latest = _get_latest_version()
+    if latest is None:
+        print("  Could not reach PyPI.")
+        sys.exit(1)
+
+    if _version_tuple(latest) <= _version_tuple(__version__):
+        print(f"  Cozempic v{__version__} is already the latest.")
+        return
+
+    print(f"  Upgrading {__version__} → {latest}...")
+    if _do_upgrade(latest):
+        print(f"  Cozempic v{latest} installed. Restart to use the new version.")
+    else:
+        print(f"  Upgrade failed. Try: pip install --upgrade cozempic")
+        sys.exit(1)
+
+
 def cmd_completions(args):
     """Generate shell completion scripts."""
     from .completion import bash_completion, zsh_completion
@@ -780,7 +802,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 1.6.6")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.6.7")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")
@@ -865,6 +887,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_comp = sub.add_parser("completions", help="Generate shell completion script")
     p_comp.add_argument("shell", choices=["bash", "zsh"], help="Shell type")
 
+    # self-update
+    sub.add_parser("self-update", help="Upgrade cozempic to the latest version from PyPI")
+
     # digest
     p_digest = sub.add_parser("digest", help="Manage behavioral correction rules")
     p_digest.add_argument("digest_action", nargs="?", default="show",
@@ -879,7 +904,7 @@ def build_parser() -> argparse.ArgumentParser:
 _SUBCOMMANDS = {
     "list", "current", "diagnose", "treat", "strategy", "reload",
     "checkpoint", "post-compact", "guard", "init", "doctor", "formulary", "completions",
-    "digest",
+    "digest", "self-update",
 }
 
 
@@ -980,6 +1005,7 @@ def main():
         "formulary": cmd_formulary,
         "completions": cmd_completions,
         "digest": cmd_digest,
+        "self-update": cmd_self_update,
     }
 
     commands[args.command](args)
