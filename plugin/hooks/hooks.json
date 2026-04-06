@@ -42,6 +42,17 @@
         ]
       }
     ],
+    "PostCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cozempic post-compact 2>/dev/null || true; echo 'Cozempic: context recovered'"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",
