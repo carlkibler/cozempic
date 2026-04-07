@@ -282,12 +282,33 @@ def cmd_treat(args):
         print("  Note: exact usage data was stripped — post-treatment token count is estimated.")
 
     if args.execute:
+        # Check for active background tasks before writing
+        from .helpers import find_active_background_tasks
+        active_tasks = find_active_background_tasks(messages)
+        if active_tasks:
+            print(f"  WARNING: {len(active_tasks)} background task(s) in progress:")
+            for t in active_tasks[:5]:
+                print(f"    - {t['description'][:70] or t['tool_use_id'][:20]}")
+            print()
+            try:
+                answer = input("  Writing may interrupt these tasks. Continue? [y/N] ")
+            except EOFError:
+                answer = "n"
+            if answer.lower() != "y":
+                print("  Aborted — wait for tasks to complete or pass --force to override.")
+                return
+
         backup = save_messages(path, new_messages, create_backup=True)
         print(f"  Applied to {path}")
         if backup:
             print(f"  Backup: {backup}")
         print(f"  Final size: {fmt_bytes(final_bytes)}")
     else:
+        # Show active tasks in dry run too
+        from .helpers import find_active_background_tasks
+        active_tasks = find_active_background_tasks(messages)
+        if active_tasks:
+            print(f"  NOTE: {len(active_tasks)} background task(s) active — executing would interrupt them.")
         print("  Dry run — pass --execute to apply.")
     print()
 
@@ -865,7 +886,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 1.6.11")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.6.12")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")

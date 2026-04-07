@@ -80,6 +80,43 @@ def is_protected(msg: dict) -> bool:
     return False
 
 
+def find_active_background_tasks(messages: list) -> list[dict]:
+    """Find background tasks that were spawned but have no completion result.
+
+    Returns list of {tool_use_id, description} for each active task.
+    """
+    import re
+    spawns: dict[str, str] = {}  # tool_use_id -> description
+    completions: set[str] = set()
+
+    for _, msg, _ in messages:
+        inner = msg.get("message", {})
+        content = inner.get("content", [])
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "tool_use" and block.get("name") == "Task":
+                        inp = block.get("input", {})
+                        if inp.get("run_in_background"):
+                            spawns[block.get("id", "")] = inp.get("description", "")
+                    if block.get("type") == "tool_result":
+                        completions.add(block.get("tool_use_id", ""))
+
+        # Check queue-operation for completed tasks
+        if msg.get("type") == "queue-operation":
+            body = str(msg.get("content", "") or msg.get("body", ""))
+            if "<status>completed</status>" in body or "<status>failed</status>" in body:
+                m = re.search(r"<tool-use-id>(.*?)</tool-use-id>", body)
+                if m:
+                    completions.add(m.group(1))
+
+    return [
+        {"tool_use_id": tid, "description": desc}
+        for tid, desc in spawns.items()
+        if tid not in completions
+    ]
+
+
 def text_of(block: dict) -> str:
     """Get the text content of a content block, handling all block types."""
     result = block.get("text", "") or block.get("thinking", "") or block.get("content", "")
