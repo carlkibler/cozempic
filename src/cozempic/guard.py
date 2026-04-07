@@ -844,39 +844,62 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
     )
 
 
-def _pid_file(cwd: str) -> Path:
-    """Return the PID file path for a guard daemon in this project."""
+def _pid_file_for_session(session_id: str) -> Path:
+    """Return the PID file path for a guard daemon watching a specific session."""
+    return Path("/tmp") / f"cozempic_guard_{session_id[:12]}.pid"
+
+
+def _pid_file_for_cwd(cwd: str) -> Path:
+    """Legacy: PID file keyed by CWD hash. Used for migration cleanup only."""
     import hashlib
     slug = hashlib.md5(cwd.encode()).hexdigest()[:12]
     return Path("/tmp") / f"cozempic_guard_{slug}.pid"
 
 
-def _session_file(cwd: str) -> Path:
-    """Return the session file path that records which session the guard is watching."""
-    import hashlib
-    slug = hashlib.md5(cwd.encode()).hexdigest()[:12]
-    return Path("/tmp") / f"cozempic_guard_{slug}_session.txt"
+def _cleanup_legacy_pid(cwd: str) -> None:
+    """Remove old CWD-keyed PID files from pre-1.6.13 installations."""
+    legacy = _pid_file_for_cwd(cwd)
+    if legacy.exists():
+        try:
+            pid = int(legacy.read_text().strip())
+            os.kill(pid, 0)
+            # Still alive — kill it so session-scoped guard can take over
+            os.kill(pid, signal.SIGTERM)
+            time.sleep(1)
+        except (ValueError, ProcessLookupError, PermissionError, OSError):
+            pass
+        legacy.unlink(missing_ok=True)
+    # Also clean session file
+    legacy_sess = Path(str(legacy).replace(".pid", "_session.txt"))
+    legacy_sess.unlink(missing_ok=True)
 
 
-def _is_guard_running(cwd: str) -> int | None:
-    """Check if a guard daemon is already running for this project.
+def _is_guard_running_for_session(session_id: str) -> int | None:
+    """Check if a guard daemon is already running for this specific session.
 
     Returns the PID if running, None otherwise.
     """
-    pid_path = _pid_file(cwd)
+    pid_path = _pid_file_for_session(session_id)
     if not pid_path.exists():
         return None
 
     try:
         pid = int(pid_path.read_text().strip())
-        # Check if process is actually alive
         os.kill(pid, 0)
         return pid
     except (ValueError, ProcessLookupError, PermissionError):
-        # Stale PID file — clean it up
         pid_path.unlink(missing_ok=True)
-        _session_file(cwd).unlink(missing_ok=True)
         return None
+
+
+# Backward compat aliases
+def _pid_file(cwd: str) -> Path:
+    return _pid_file_for_cwd(cwd)
+
+
+def _is_guard_running(cwd: str) -> int | None:
+    """Legacy check — scans for any guard PID file matching this CWD."""
+    return _is_guard_running_for_session(cwd)  # Won't match, but keeps signature
 
 
 def start_guard_daemon(
@@ -901,38 +924,46 @@ def start_guard_daemon(
     """
     cwd = cwd or os.getcwd()
 
-    existing_pid = _is_guard_running(cwd)
-    if existing_pid:
-        # Check whether the existing guard is watching the same session (#11)
-        sess_path = _session_file(cwd)
-        old_session = sess_path.read_text().strip() if sess_path.exists() else None
+    # Migrate: clean up legacy CWD-keyed PID files from pre-1.6.13
+    _cleanup_legacy_pid(cwd)
 
-        if session_id is not None and old_session != session_id:
-            # Session changed — kill the stale guard and start a new one
-            print(
-                f"  Replacing guard (session changed: "
-                f"{old_session[:8] if old_session else '?'} → {session_id[:8]})"
-            )
-            try:
-                os.kill(existing_pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-            time.sleep(1)
-            _pid_file(cwd).unlink(missing_ok=True)
-            sess_path.unlink(missing_ok=True)
-        else:
+    # If we have a session_id, check if a guard already exists for THIS session
+    if session_id:
+        existing_pid = _is_guard_running_for_session(session_id)
+        if existing_pid:
             return {
                 "started": False,
                 "pid": existing_pid,
-                "pid_file": str(_pid_file(cwd)),
+                "pid_file": str(_pid_file_for_session(session_id)),
                 "log_file": None,
                 "already_running": True,
             }
+    else:
+        # No session_id — detect from CWD (backward compat with old hooks)
+        sess = find_current_session(cwd)
+        if sess:
+            session_id = sess.get("session_id", "")
 
-    import hashlib
-    slug = hashlib.md5(cwd.encode()).hexdigest()[:12]
-    log_file = Path("/tmp") / f"cozempic_guard_{slug}.log"
-    pid_path = _pid_file(cwd)
+        if session_id:
+            existing_pid = _is_guard_running_for_session(session_id)
+            if existing_pid:
+                return {
+                    "started": False,
+                    "pid": existing_pid,
+                    "pid_file": str(_pid_file_for_session(session_id)),
+                    "log_file": None,
+                    "already_running": True,
+                }
+
+    # Use session_id for PID file if available, fall back to CWD hash
+    if session_id:
+        pid_key = session_id[:12]
+    else:
+        import hashlib
+        pid_key = hashlib.md5(cwd.encode()).hexdigest()[:12]
+
+    log_file = Path("/tmp") / f"cozempic_guard_{pid_key}.log"
+    pid_path = Path("/tmp") / f"cozempic_guard_{pid_key}.pid"
 
     # Build the guard command
     cmd_parts = [
@@ -976,10 +1007,8 @@ def start_guard_daemon(
             env=env,
         )
 
-    # Write PID file and session file so stale guards can be detected on restart (#11)
+    # Write PID file — keyed by session ID (or CWD hash as fallback)
     pid_path.write_text(str(proc.pid))
-    if session_id is not None:
-        _session_file(cwd).write_text(session_id)
 
     return {
         "started": True,
