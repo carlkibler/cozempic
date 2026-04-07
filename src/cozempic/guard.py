@@ -270,6 +270,9 @@ def start_guard(
     from .session import record_session
     record_session(sess["session_id"], cwd or os.getcwd(), context_window)
 
+    # Clean up stale reload watchers from previous versions
+    _cleanup_stale_watchers()
+
     # Auto-update check — force=True so it works even when guard runs via hook (no TTY)
     from .updater import maybe_auto_update, ping_install_if_new
     ping_install_if_new()
@@ -625,6 +628,27 @@ def guard_prune_cycle(
             print(f"  Restart manually: claude {resume_flag}")
 
     return result
+
+
+def _cleanup_stale_watchers() -> None:
+    """Kill stale reload watchers from previous Cozempic versions.
+
+    Old watchers (pre-1.6.10) had hardcoded resume commands without flag
+    detection. They linger as zombie processes waiting for Claude to exit.
+    """
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "cozempic.*resumed Claude"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for pid_str in result.stdout.strip().split("\n"):
+            if pid_str:
+                try:
+                    os.kill(int(pid_str), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, ValueError):
+                    pass
+    except Exception:
+        pass
 
 
 def _detect_skip_permissions(pid: int) -> bool:
