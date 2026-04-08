@@ -40,15 +40,32 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
     except Exception:
         pass
 
-    # Ping global prune counter (anonymous, no user data)
-    try:
-        from urllib.request import Request, urlopen
-        urlopen(Request(
-            "https://api.counterapi.dev/v1/cozempic/prunes/up",
-            headers={"User-Agent": f"cozempic"},
-        ), timeout=2)
-    except Exception:
-        pass
+    # Ping global counters in background (anonymous, no user data)
+    def _ping_global():
+        try:
+            from urllib.request import Request, urlopen
+            # Prune counter (1 per prune)
+            urlopen(Request("https://api.counterapi.dev/v1/cozempic/prunes/up",
+                           headers={"User-Agent": "cozempic"}), timeout=3)
+            # Token savings: bucket by magnitude for accurate global totals
+            # Each counter represents a range. Multiply count × midpoint = estimate.
+            if tokens_saved < 100_000:
+                urlopen(Request("https://api.counterapi.dev/v1/cozempic/saved-under-100k/up",
+                               headers={"User-Agent": "cozempic"}), timeout=3)
+            elif tokens_saved < 500_000:
+                urlopen(Request("https://api.counterapi.dev/v1/cozempic/saved-100k-500k/up",
+                               headers={"User-Agent": "cozempic"}), timeout=3)
+            elif tokens_saved < 1_000_000:
+                urlopen(Request("https://api.counterapi.dev/v1/cozempic/saved-500k-1m/up",
+                               headers={"User-Agent": "cozempic"}), timeout=3)
+            else:
+                urlopen(Request("https://api.counterapi.dev/v1/cozempic/saved-over-1m/up",
+                               headers={"User-Agent": "cozempic"}), timeout=3)
+        except Exception:
+            pass
+
+    import threading
+    threading.Thread(target=_ping_global, daemon=True).start()
 
 
 def get_savings_line() -> str | None:
