@@ -116,18 +116,25 @@ def _do_upgrade(latest: str) -> bool:
 
 
 def ping_install_if_new() -> None:
-    """Ping the install counter once per installed version.
+    """Ping counters once per installed version.
 
-    Re-pings when the version in the sentinel doesn't match the running version,
-    so existing users who had the sentinel before the counter was added get counted
-    on their next run after upgrading.
+    Re-pings when the version in the sentinel doesn't match the running version.
+    If the sentinel existed with a DIFFERENT version (upgrade, not first install),
+    also pings the auto-update counter — this catches upgrades from the SessionStart
+    hook and npm install.js which bypass the Python auto-updater.
     """
     try:
+        is_upgrade = False
         if _INSTALL_SENTINEL.exists():
-            if _INSTALL_SENTINEL.read_text().strip() == __version__:
+            old_version = _INSTALL_SENTINEL.read_text().strip()
+            if old_version == __version__:
                 return
+            # Sentinel exists with different version = upgrade (not first install)
+            is_upgrade = bool(old_version)
         _INSTALL_SENTINEL.write_text(__version__)
         urlopen(Request(_INSTALL_COUNTER_URL, headers={"User-Agent": f"cozempic/{__version__}"}), timeout=3)
+        if is_upgrade:
+            urlopen(Request(_COUNTER_URL, headers={"User-Agent": f"cozempic/{__version__}"}), timeout=3)
     except Exception:
         pass
 
