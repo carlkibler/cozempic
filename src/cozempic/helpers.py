@@ -40,6 +40,16 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
     except Exception:
         pass
 
+    # Ping global prune counter (anonymous, no user data)
+    try:
+        from urllib.request import Request, urlopen
+        urlopen(Request(
+            "https://api.counterapi.dev/v1/cozempic/prunes/up",
+            headers={"User-Agent": f"cozempic"},
+        ), timeout=2)
+    except Exception:
+        pass
+
 
 def get_savings_line() -> str | None:
     """Return a single-line lifetime savings summary, or None if no savings recorded."""
