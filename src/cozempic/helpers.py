@@ -22,6 +22,7 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
     except Exception:
         data = {}
     data["tokens_saved"] = data.get("tokens_saved", 0) + tokens_saved
+    data["tokens_processed"] = data.get("tokens_processed", 0) + total_tokens
     data["prune_count"] = data.get("prune_count", 0) + 1
     if "since" not in data:
         from datetime import date
@@ -47,6 +48,7 @@ def get_savings_line() -> str | None:
             return None
         data = _json.loads(_SAVINGS_FILE.read_text())
         total = data.get("tokens_saved", 0)
+        processed = data.get("tokens_processed", 0)
         count = data.get("prune_count", 0)
         turns = data.get("turns_gained", 0)
         since = data.get("since", "")
@@ -58,10 +60,16 @@ def get_savings_line() -> str | None:
             tok_str = f"{total / 1_000:.0f}K"
         else:
             tok_str = str(total)
+
+        # Session extension multiplier: processed / (processed - saved)
+        remaining = processed - total
+        multiplier = f"{processed / remaining:.1f}x" if remaining > 0 else ""
+
         parts = [f"Cozempic: {tok_str} tokens saved"]
+        if multiplier:
+            parts.append(f"{multiplier} longer sessions")
         if turns > 0:
             parts.append(f"~{turns} extra turns")
-        parts.append(f"{count} prunes since {since}")
         return " | ".join(parts)
     except Exception:
         return None
