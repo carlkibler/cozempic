@@ -3,6 +3,68 @@
 from __future__ import annotations
 
 import copy
+import json as _json
+from pathlib import Path as _Path
+
+_SAVINGS_FILE = _Path.home() / ".cozempic_savings.json"
+
+
+def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0) -> None:
+    """Add tokens saved to the lifetime tracker. Called after successful prune+reload.
+
+    If total_tokens and turn_count are provided, estimates extra turns gained
+    from the freed headroom.
+    """
+    if tokens_saved <= 0:
+        return
+    try:
+        data = _json.loads(_SAVINGS_FILE.read_text()) if _SAVINGS_FILE.exists() else {}
+    except Exception:
+        data = {}
+    data["tokens_saved"] = data.get("tokens_saved", 0) + tokens_saved
+    data["prune_count"] = data.get("prune_count", 0) + 1
+    if "since" not in data:
+        from datetime import date
+        data["since"] = date.today().isoformat()
+
+    # Estimate extra turns gained from freed headroom
+    if turn_count > 0 and total_tokens > 0:
+        avg_per_turn = total_tokens / turn_count
+        if avg_per_turn > 0:
+            extra_turns = int(tokens_saved / avg_per_turn)
+            data["turns_gained"] = data.get("turns_gained", 0) + extra_turns
+
+    try:
+        _SAVINGS_FILE.write_text(_json.dumps(data))
+    except Exception:
+        pass
+
+
+def get_savings_line() -> str | None:
+    """Return a single-line lifetime savings summary, or None if no savings recorded."""
+    try:
+        if not _SAVINGS_FILE.exists():
+            return None
+        data = _json.loads(_SAVINGS_FILE.read_text())
+        total = data.get("tokens_saved", 0)
+        count = data.get("prune_count", 0)
+        turns = data.get("turns_gained", 0)
+        since = data.get("since", "")
+        if total <= 0:
+            return None
+        if total >= 1_000_000:
+            tok_str = f"{total / 1_000_000:.1f}M"
+        elif total >= 1_000:
+            tok_str = f"{total / 1_000:.0f}K"
+        else:
+            tok_str = str(total)
+        parts = [f"Cozempic: {tok_str} tokens saved"]
+        if turns > 0:
+            parts.append(f"~{turns} extra turns")
+        parts.append(f"{count} prunes since {since}")
+        return " | ".join(parts)
+    except Exception:
+        return None
 import json
 
 

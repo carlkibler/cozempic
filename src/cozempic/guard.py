@@ -419,6 +419,10 @@ def start_guard(
                 )
 
                 if result.get("reloading"):
+                    from .helpers import get_savings_line
+                    savings = get_savings_line()
+                    if savings:
+                        print(f"  {savings}")
                     print(f"  Reload triggered. Guard exiting.")
                     break
 
@@ -461,6 +465,10 @@ def start_guard(
                     )
 
                 if result.get("reloading"):
+                    from .helpers import get_savings_line
+                    savings = get_savings_line()
+                    if savings:
+                        print(f"  {savings}")
                     print(f"  Reload triggered. Guard exiting.")
                     break
 
@@ -604,6 +612,15 @@ def guard_prune_cycle(
     except PruneConflictError as exc:
         print(f"  [{_now()}] Prune deferred — conflict detected: {exc}", file=sys.stderr)
         return _no_change
+
+    # Track lifetime savings
+    tokens_saved = pre_te.total - post_te.total if pre_te.total and post_te.total else 0
+    if tokens_saved > 0:
+        from .helpers import record_savings, get_msg_type
+        turn_count = sum(1 for _, m, _ in messages
+                       if get_msg_type(m) == "user"
+                       and isinstance(m.get("message", {}).get("content", ""), str))
+        record_savings(tokens_saved, total_tokens=pre_te.total, turn_count=turn_count)
 
     result = {
         "saved_mb": saved_bytes / 1024 / 1024,

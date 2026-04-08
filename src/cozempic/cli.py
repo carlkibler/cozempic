@@ -303,6 +303,18 @@ def cmd_treat(args):
         if backup:
             print(f"  Backup: {backup}")
         print(f"  Final size: {fmt_bytes(final_bytes)}")
+
+        # Track lifetime savings
+        if pr.original_tokens and pr.final_tokens:
+            from .helpers import record_savings, get_msg_type
+            turn_count = sum(1 for _, m, _ in messages
+                           if get_msg_type(m) == "user"
+                           and isinstance(m.get("message", {}).get("content", ""), str))
+            record_savings(
+                pr.original_tokens - pr.final_tokens,
+                total_tokens=pr.original_tokens,
+                turn_count=turn_count,
+            )
     else:
         # Show active tasks in dry run too
         from .helpers import find_active_background_tasks
@@ -422,6 +434,21 @@ def cmd_reload(args):
     if backup:
         print(f"  Backup: {backup}")
     print(f"  Final size: {fmt_bytes(final_bytes)}")
+
+    # Track lifetime savings
+    if pre_te.total and post_te.total:
+        from .helpers import record_savings, get_savings_line, get_msg_type
+        turn_count = sum(1 for _, m, _ in messages
+                       if get_msg_type(m) == "user"
+                       and isinstance(m.get("message", {}).get("content", ""), str))
+        record_savings(
+            pre_te.total - post_te.total,
+            total_tokens=pre_te.total,
+            turn_count=turn_count,
+        )
+        savings = get_savings_line()
+        if savings:
+            print(f"  {savings}")
     print()
 
     # Step 2: Generate recap from the pruned messages
