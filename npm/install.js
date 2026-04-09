@@ -44,7 +44,7 @@ const noAutoUpdate = process.env.COZEMPIC_NO_AUTO_UPDATE;
 if (!noAutoUpdate) {
   const claudeDir = join(os.homedir(), ".claude");
   const globalSettingsPath = join(claudeDir, "settings.json");
-  const hookCmd = "cozempic guard --daemon 2>/dev/null || true";
+  const hookCmd = "{ cozempic guard --daemon 2>/dev/null || python3 -m cozempic guard --daemon 2>/dev/null; } || true";
 
   try {
     if (existsSync(claudeDir)) {
@@ -74,7 +74,10 @@ const cwd = process.env.INIT_CWD || process.cwd();
 if (!noAutoUpdate) {
   try {
     if (existsSync(join(cwd, ".claude"))) {
-      spawnSync("cozempic", ["init", "--quiet"], { stdio: "pipe", cwd });
+      let r = spawnSync("cozempic", ["init", "--quiet"], { stdio: "pipe", cwd });
+      if (r.status !== 0) {
+        spawnSync("python3", ["-m", "cozempic", "init", "--quiet"], { stdio: "pipe", cwd });
+      }
     }
   } catch {}
 }

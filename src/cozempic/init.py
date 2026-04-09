@@ -16,6 +16,17 @@ from datetime import datetime
 from pathlib import Path
 
 
+# ─── Command resolver ────────────────────────────────────────────────────────
+# Use a shell snippet that finds cozempic regardless of PATH setup.
+# Tries: bare command → python3 -m → python -m. Defined once, used in all hooks.
+_CMD = '$(command -v cozempic >/dev/null 2>&1 && echo cozempic || echo "python3 -m cozempic")'
+
+# For inline use in hook commands:
+def _c(args: str) -> str:
+    """Build a cozempic command that works regardless of PATH."""
+    return f'{{ cozempic {args} 2>/dev/null || python3 -m cozempic {args} 2>/dev/null; }}'
+
+
 # ─── Hook definitions ────────────────────────────────────────────────────────
 
 COZEMPIC_HOOKS = {
@@ -31,8 +42,8 @@ COZEMPIC_HOOKS = {
                         "TRANSCRIPT=$(echo \"$INPUT\" | python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); "
                         "{ uv pip install --upgrade cozempic --quiet 2>/dev/null || "
                         "pip install --upgrade cozempic --quiet --disable-pip-version-check 2>/dev/null; } & "
-                        "cozempic guard --daemon ${SESSION_ID:+--session $SESSION_ID} 2>/dev/null || true; "
-                        "cozempic digest inject ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null || true"
+                        + _c("guard --daemon ${SESSION_ID:+--session $SESSION_ID}") + " || true; "
+                        + _c("digest inject ${TRANSCRIPT:+--session $TRANSCRIPT}") + " || true"
                     ),
                 }
             ],
@@ -44,7 +55,7 @@ COZEMPIC_HOOKS = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "cozempic checkpoint 2>/dev/null || true",
+                    "command": "{ cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true",
                 }
             ],
         },
@@ -53,7 +64,7 @@ COZEMPIC_HOOKS = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "cozempic checkpoint 2>/dev/null || true",
+                    "command": "{ cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true",
                 }
             ],
         },
@@ -62,7 +73,7 @@ COZEMPIC_HOOKS = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "cozempic remind || true",
+                    "command": "{ cozempic remind 2>/dev/null || python3 -m cozempic remind 2>/dev/null; } || true",
                 }
             ],
         },
@@ -75,8 +86,8 @@ COZEMPIC_HOOKS = {
                     "type": "command",
                     "command": (
                         "TRANSCRIPT=$(cat | python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); "
-                        "cozempic checkpoint 2>/dev/null || true; "
-                        "cozempic digest flush ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null || true"
+                        "{ cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true; "
+                        "{ cozempic digest flush ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null || python3 -m cozempic digest flush ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null; } || true"
                     ),
                 }
             ],
@@ -88,7 +99,7 @@ COZEMPIC_HOOKS = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": "cozempic post-compact 2>/dev/null || true; cozempic digest inject 2>/dev/null || true",
+                    "command": "{ cozempic post-compact 2>/dev/null || python3 -m cozempic post-compact 2>/dev/null; } || true; { cozempic digest inject 2>/dev/null || python3 -m cozempic digest inject 2>/dev/null; } || true",
                 }
             ],
         },
@@ -101,8 +112,8 @@ COZEMPIC_HOOKS = {
                     "type": "command",
                     "command": (
                         "TRANSCRIPT=$(cat | python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); "
-                        "cozempic checkpoint 2>/dev/null || true; "
-                        "cozempic digest flush ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null || true"
+                        "{ cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true; "
+                        "{ cozempic digest flush ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null || python3 -m cozempic digest flush ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null; } || true"
                     ),
                 }
             ],
