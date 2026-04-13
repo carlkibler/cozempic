@@ -42,7 +42,7 @@ COZEMPIC_HOOKS = {
                         "TRANSCRIPT=$(echo \"$INPUT\" | python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); "
                         "{ uv pip install --upgrade cozempic --quiet 2>/dev/null || "
                         "pip install --upgrade cozempic --quiet --disable-pip-version-check 2>/dev/null; } & "
-                        + _c("guard --daemon ${SESSION_ID:+--session $SESSION_ID}") + " || true; "
+                        + _c("guard --daemon ${TRANSCRIPT:+--session $TRANSCRIPT}") + " || true; "
                         + _c("digest inject ${TRANSCRIPT:+--session $TRANSCRIPT}") + " || true"
                     ),
                 }

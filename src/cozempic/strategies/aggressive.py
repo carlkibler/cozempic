@@ -426,7 +426,7 @@ def strategy_envelope_strip(messages: list[Message], config: dict) -> StrategyRe
         if pos == 0 or is_protected(msg):
             continue
 
-        new_msg = copy.deepcopy(msg)
+        new_msg = {**msg}  # Shallow copy — only top-level fields deleted
         changed = False
         for f in constant_fields:
             if f in new_msg:
@@ -480,7 +480,7 @@ def strategy_tool_use_result_strip(messages: list[Message], config: dict) -> Str
             continue
         if "toolUseResult" not in msg:
             continue
-        new_msg = copy.deepcopy(msg)
+        new_msg = {**msg}  # Shallow copy — only top-level field deleted
         del new_msg["toolUseResult"]
         new_size = msg_bytes(new_msg)
         saved = size - new_size

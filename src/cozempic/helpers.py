@@ -165,6 +165,8 @@ def is_protected(msg: dict) -> bool:
         return True
     if msg.get("__cozempic_behavioral_digest__"):
         return True
+    if msg.get("__cozempic_team_protected__"):
+        return True
     return False
 
 

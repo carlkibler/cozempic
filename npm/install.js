@@ -44,7 +44,7 @@ const noAutoUpdate = process.env.COZEMPIC_NO_AUTO_UPDATE;
 if (!noAutoUpdate) {
   const claudeDir = join(os.homedir(), ".claude");
   const globalSettingsPath = join(claudeDir, "settings.json");
-  const hookCmd = "{ cozempic guard --daemon 2>/dev/null || python3 -m cozempic guard --daemon 2>/dev/null; } || true";
+  const hookCmd = "HOOK_DATA=$(cat); TRANSCRIPT=$(echo \"$HOOK_DATA\" | python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); { cozempic guard --daemon ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null || python3 -m cozempic guard --daemon ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null; } || true";
 
   try {
     if (existsSync(claudeDir)) {

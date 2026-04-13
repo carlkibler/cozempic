@@ -199,7 +199,9 @@ def run_prescription(
         sr = STRATEGIES[sname].func(current, config)
         results.append(sr)
         if sr.actions:
+            old_current = current
             current = execute_actions(current, sr.actions)
+            del old_current  # Free previous list immediately
 
     # Post-treatment validation: fix orphaned tool_results
     current, orphans = fix_orphaned_tool_results(current)

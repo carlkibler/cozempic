@@ -250,7 +250,7 @@ def strategy_metadata_strip(messages: list[Message], config: dict) -> StrategyRe
     for pos, (idx, msg, size) in enumerate(messages):
         if is_protected(msg):
             continue
-        new_msg = copy.deepcopy(msg)
+        new_msg = {**msg, "message": {**msg.get("message", {})}}  # Shallow copy outer + inner
         changed = False
 
         inner = new_msg.get("message", {})

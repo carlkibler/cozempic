@@ -44,13 +44,23 @@ from .team import TeamState, extract_team_state, inject_team_recovery, write_tea
 from .tokens import default_token_thresholds, quick_token_estimate
 
 
-def _resolve_session_by_id(session_id: str, max_retries: int = 5, retry_delay: float = 1.0) -> dict | None:
+def _normalize_session_id(session_id: str) -> str:
+    """Extract UUID from a session_id that might be a full path."""
+    if session_id.endswith(".jsonl"):
+        return Path(session_id).stem
+    return session_id
+
+
+def _resolve_session_by_id(session_id: str, max_retries: int = 10, retry_delay: float = 1.5) -> dict | None:
     """Find a session by explicit ID, UUID prefix, or path.
 
-    Retries up to max_retries times to handle the race condition where the
-    SessionStart hook fires before Claude Code creates the JSONL file (#21).
+    Handles full JSONL paths (from SessionStart hook), UUIDs, and prefixes.
+    Retries up to max_retries times (15s total) to handle the race condition
+    where the hook fires before Claude Code creates the JSONL file (#73).
     """
     p = Path(session_id)
+
+    # Fast path: full path exists on disk
     if p.exists() and p.suffix == ".jsonl":
         return {
             "path": p,
@@ -59,9 +69,20 @@ def _resolve_session_by_id(session_id: str, max_retries: int = 5, retry_delay: f
             "project": p.parent.name,
         }
 
+    # Extract UUID from path-like input (file may not exist yet)
+    search_id = _normalize_session_id(session_id)
+
     for attempt in range(max_retries):
+        # Re-check path on each retry (file may appear)
+        if p.suffix == ".jsonl" and p.exists():
+            return {
+                "path": p,
+                "session_id": p.stem,
+                "size": p.stat().st_size,
+                "project": p.parent.name,
+            }
         for sess in find_sessions():
-            if sess["session_id"] == session_id or sess["session_id"].startswith(session_id):
+            if sess["session_id"] == search_id or sess["session_id"].startswith(search_id):
                 return sess
         if attempt < max_retries - 1:
             time.sleep(retry_delay)
@@ -130,11 +151,10 @@ def prune_with_team_protect(
     Returns (pruned_messages, strategy_results, team_state).
 
     Strategy:
-    1. Extract team state first
-    2. Mark team message indices
-    3. Run prescription on non-team messages
-    4. Re-insert team messages at their original positions
-    5. Inject team recovery messages at the end
+    1. Extract team state
+    2. Tag team messages with __cozempic_team_protected__ (is_protected() skips them)
+    3. Run prescription on the FULL list (no splitting, no memory doubling)
+    4. Remove tags, inject team recovery messages
     """
     from .team import _is_team_message
 
@@ -149,8 +169,7 @@ def prune_with_team_protect(
         new_messages, results = run_prescription(messages, strategy_names, config)
         return new_messages, results, team_state
 
-    # 2. Build pending_task_ids — tool_use IDs for ALL team-related calls.
-    # Covers Task results (agent output) AND TaskOutput, SendMessage, etc.
+    # 2. Build pending_task_ids
     from .team import TEAM_TOOL_NAMES
     pending_task_ids: set[str] = set()
     for _, msg_dict, _ in messages:
@@ -161,35 +180,24 @@ def prune_with_team_protect(
                 if tool_use_id:
                     pending_task_ids.add(tool_use_id)
 
-    # 3. Separate team and non-team messages
-    team_messages = []
-    non_team_messages = []
-
-    for msg_tuple in messages:
-        line_idx, msg_dict, byte_size = msg_tuple
+    # 3. Tag team messages as protected (strategies skip via is_protected())
+    tagged_indices: list[int] = []
+    for _, msg_dict, _ in messages:
         if _is_team_message(msg_dict, pending_task_ids):
-            team_messages.append(msg_tuple)
-        else:
-            non_team_messages.append(msg_tuple)
+            msg_dict["__cozempic_team_protected__"] = True
+            tagged_indices.append(id(msg_dict))
 
-    # If the entire session is team context (no non-team messages to prune),
-    # fall back to pruning all messages without team-protect (#21). This happens
-    # when a long team session grows large with no "free" content to remove.
-    if not non_team_messages:
-        new_messages, results = run_prescription(messages, strategy_names, config)
-        return new_messages, results, team_state
+    # 4. Prune full list — team messages are protected, no list splitting needed
+    pruned_messages, results = run_prescription(messages, strategy_names, config)
 
-    # 3. Prune only non-team messages
-    pruned_non_team, results = run_prescription(non_team_messages, strategy_names, config)
+    # 5. Remove tags from surviving messages
+    for _, msg_dict, _ in pruned_messages:
+        msg_dict.pop("__cozempic_team_protected__", None)
 
-    # 4. Merge back: insert team messages at their original relative positions
-    all_messages = list(pruned_non_team) + team_messages
-    all_messages.sort(key=lambda m: m[0])  # Sort by original line index
+    # 6. Inject team recovery messages at the end
+    pruned_messages = inject_team_recovery(pruned_messages, team_state)
 
-    # 5. Inject team recovery messages at the end
-    all_messages = inject_team_recovery(all_messages, team_state)
-
-    return all_messages, results, team_state
+    return pruned_messages, results, team_state
 
 
 # ─── Guard daemon ─────────────────────────────────────────────────────────────
@@ -245,6 +253,12 @@ def start_guard(
     else:
         sess = find_current_session(cwd, strict=True)
     if not sess:
+        # Clean up any stale PID file from this failed startup
+        if session_id:
+            try:
+                _pid_file_for_session(session_id).unlink(missing_ok=True)
+            except Exception:
+                pass
         print("  ERROR: Could not detect current session.", file=sys.stderr)
         if not session_id:
             print("  Tip: Use --session <session_id> for explicit targeting.", file=sys.stderr)
@@ -560,6 +574,12 @@ def guard_prune_cycle(
         with _PruneLock(session_path):
             # Snapshot before load so we can detect Claude appending mid-prune
             snap = snapshot_session(session_path)
+
+            # Size guard: skip prune for very large sessions (OOM risk #74)
+            file_size_mb = session_path.stat().st_size / 1024 / 1024
+            if file_size_mb > 200:
+                print(f"  [{_now()}] Session {file_size_mb:.0f}MB exceeds 200MB — skipping prune (OOM risk).", file=sys.stderr)
+                return _no_change
 
             messages = load_messages(session_path)
             original_bytes = sum(b for _, _, b in messages)
@@ -887,6 +907,7 @@ def _spawn_reload_watcher(claude_pid: int, project_dir: str, session_id: str | N
 
 def _pid_file_for_session(session_id: str) -> Path:
     """Return the PID file path for a guard daemon watching a specific session."""
+    session_id = _normalize_session_id(session_id)
     return Path("/tmp") / f"cozempic_guard_{session_id[:12]}.pid"
 
 
@@ -1025,7 +1046,7 @@ def start_guard_daemon(
     if soft_threshold_tokens is not None:
         cmd_parts.extend(["--soft-threshold-tokens", str(soft_threshold_tokens)])
     if session_id is not None:
-        cmd_parts.extend(["--session", session_id])
+        cmd_parts.extend(["--session", _normalize_session_id(session_id)])
 
     # Spawn detached process
     with open(log_file, "a", encoding="utf-8") as lf:
