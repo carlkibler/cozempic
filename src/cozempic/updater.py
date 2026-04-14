@@ -112,6 +112,19 @@ def _do_upgrade(latest: str) -> bool:
         except Exception:
             pass
 
+    # Try uv tool upgrade (for uv tool install users)
+    if shutil.which("uv"):
+        try:
+            result = subprocess.run(
+                ["uv", "tool", "upgrade", "cozempic"],
+                capture_output=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                return True
+        except Exception:
+            pass
+
     return False
 
 
@@ -179,4 +192,4 @@ def maybe_auto_update(force: bool = False, silent: bool = False) -> None:
             print(f"  Cozempic: updated to v{latest}.", flush=True)
     else:
         if not silent:
-            print(f"  Cozempic: auto-update failed. Run: pip install --upgrade cozempic", flush=True)
+            print(f"  Cozempic: auto-update failed. Run: pipx upgrade cozempic (or pip install --upgrade / uv tool upgrade)", flush=True)
