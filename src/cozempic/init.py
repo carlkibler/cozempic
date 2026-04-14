@@ -17,11 +17,6 @@ from pathlib import Path
 
 
 # ─── Command resolver ────────────────────────────────────────────────────────
-# Use a shell snippet that finds cozempic regardless of PATH setup.
-# Tries: bare command → python3 -m → python -m. Defined once, used in all hooks.
-_CMD = '$(command -v cozempic >/dev/null 2>&1 && echo cozempic || echo "python3 -m cozempic")'
-
-# For inline use in hook commands:
 def _c(args: str) -> str:
     """Build a cozempic command that works regardless of PATH."""
     return f'{{ cozempic {args} 2>/dev/null || python3 -m cozempic {args} 2>/dev/null; }}'
@@ -41,7 +36,9 @@ COZEMPIC_HOOKS = {
                         "SESSION_ID=$(echo \"$INPUT\" | python3 -c \"import sys,json; print(json.load(sys.stdin).get('session_id',''))\" 2>/dev/null); "
                         "TRANSCRIPT=$(echo \"$INPUT\" | python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); "
                         "{ uv pip install --upgrade cozempic --quiet 2>/dev/null || "
-                        "pip install --upgrade cozempic --quiet --disable-pip-version-check 2>/dev/null; } & "
+                        "pip install --upgrade cozempic --quiet --disable-pip-version-check 2>/dev/null || "
+                        "pipx upgrade cozempic 2>/dev/null || "
+                        "uv tool upgrade cozempic 2>/dev/null; } & "
                         + _c("guard --daemon ${TRANSCRIPT:+--session $TRANSCRIPT}") + " || true; "
                         + _c("digest inject ${TRANSCRIPT:+--session $TRANSCRIPT}") + " || true"
                     ),

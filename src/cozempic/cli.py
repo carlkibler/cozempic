@@ -745,7 +745,7 @@ def cmd_self_update(args):
     if _do_upgrade(latest):
         print(f"  Cozempic v{latest} installed. Restart to use the new version.")
     else:
-        print(f"  Upgrade failed. Try: pip install --upgrade cozempic")
+        print(f"  Upgrade failed. Try: pipx upgrade cozempic (or pip install --upgrade / uv tool upgrade)")
         sys.exit(1)
 
 

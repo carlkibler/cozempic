@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import copy
-import json as _json
+import json
+import threading
 from pathlib import Path as _Path
 
 _SAVINGS_FILE = _Path.home() / ".cozempic_savings.json"
@@ -18,7 +19,7 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
     if tokens_saved <= 0:
         return
     try:
-        data = _json.loads(_SAVINGS_FILE.read_text()) if _SAVINGS_FILE.exists() else {}
+        data = json.loads(_SAVINGS_FILE.read_text()) if _SAVINGS_FILE.exists() else {}
     except Exception:
         data = {}
     data["tokens_saved"] = data.get("tokens_saved", 0) + tokens_saved
@@ -36,27 +37,33 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
             data["turns_gained"] = data.get("turns_gained", 0) + extra_turns
 
     try:
-        _SAVINGS_FILE.write_text(_json.dumps(data))
+        _SAVINGS_FILE.write_text(json.dumps(data))
     except Exception:
         pass
 
-    # Ping global counters (anonymous, no user data, quick with short timeout)
-    try:
-        from urllib.request import Request, urlopen
-        urlopen(Request("https://api.counterapi.dev/v1/cozempic/prunes/up",
-                       headers={"User-Agent": "cozempic"}), timeout=2)
-        if tokens_saved < 100_000:
-            bucket = "saved-under-100k"
-        elif tokens_saved < 500_000:
-            bucket = "saved-100k-500k"
-        elif tokens_saved < 1_000_000:
-            bucket = "saved-500k-1m"
-        else:
-            bucket = "saved-over-1m"
-        urlopen(Request(f"https://api.counterapi.dev/v1/cozempic/{bucket}/up",
-                       headers={"User-Agent": "cozempic"}), timeout=2)
-    except Exception:
-        pass
+    # Ping global counters in background. atexit join ensures pings complete
+    # before process exit without blocking CLI output.
+    def _ping():
+        try:
+            from urllib.request import Request, urlopen
+            urlopen(Request("https://api.counterapi.dev/v1/cozempic/prunes/up",
+                           headers={"User-Agent": "cozempic"}), timeout=2)
+            if tokens_saved < 100_000:
+                bucket = "saved-under-100k"
+            elif tokens_saved < 500_000:
+                bucket = "saved-100k-500k"
+            elif tokens_saved < 1_000_000:
+                bucket = "saved-500k-1m"
+            else:
+                bucket = "saved-over-1m"
+            urlopen(Request(f"https://api.counterapi.dev/v1/cozempic/{bucket}/up",
+                           headers={"User-Agent": "cozempic"}), timeout=2)
+        except Exception:
+            pass
+    import atexit
+    t = threading.Thread(target=_ping, daemon=True)
+    t.start()
+    atexit.register(t.join, 4)
 
 
 def get_savings_line() -> str | None:
@@ -64,7 +71,7 @@ def get_savings_line() -> str | None:
     try:
         if not _SAVINGS_FILE.exists():
             return None
-        data = _json.loads(_SAVINGS_FILE.read_text())
+        data = json.loads(_SAVINGS_FILE.read_text())
         total = data.get("tokens_saved", 0)
         processed = data.get("tokens_processed", 0)
         count = data.get("prune_count", 0)
@@ -91,7 +98,6 @@ def get_savings_line() -> str | None:
         return " | ".join(parts)
     except Exception:
         return None
-import json
 
 
 def msg_bytes(msg: dict) -> int:
