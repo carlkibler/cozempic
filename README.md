@@ -1,8 +1,8 @@
 # Cozempic
 
-![Downloads](https://img.shields.io/badge/downloads-20k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.6.19-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Downloads](https://img.shields.io/badge/downloads-35k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.6.19-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**20,000+ power users** trust Cozempic to keep their Claude Code sessions lean.
+**35,000+ power users** trust Cozempic to keep their Claude Code sessions lean.
 
 Context cleaning for [Claude Code](https://claude.ai/code) ��� **remove the bloat, keep everything that matters, protect Agent Teams from context loss**.
 
