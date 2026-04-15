@@ -1,6 +1,6 @@
 # Cozempic
 
-![Downloads](https://img.shields.io/badge/downloads-35k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.6.19-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Downloads](https://img.shields.io/badge/downloads-35k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.7.0-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 **35,000+ power users** trust Cozempic to keep their Claude Code sessions lean.
 
@@ -247,6 +247,11 @@ After `cozempic init`, these hooks are wired automatically:
 
 ## Changelog
 
+### v1.7.0
+
+- **Telemetry opt-out**: `COZEMPIC_NO_TELEMETRY=1` disables anonymous usage counters
+- **Documented configuration**: `COZEMPIC_NO_AUTO_UPDATE`, `COZEMPIC_NO_TELEMETRY`, `COZEMPIC_CONTEXT_WINDOW` env vars
+
 ### v1.6.x
 
 - **4-tier pruning**: soft (25%, no reload) → hard (55%, reload) → emergency (80%, aggressive reload) → user (90%, manual)
@@ -286,6 +291,14 @@ After `cozempic init`, these hooks are wired automatically:
 - image-strip strategy (keep last 20%)
 - Auto-update, install tracking, npm package
 - Safety improvements: SIGTERM handler, backup cleanup, permission error handling
+
+## Configuration
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `COZEMPIC_CONTEXT_WINDOW` | auto-detect | Override context window size (e.g. `200000` for Pro plan) |
+| `COZEMPIC_NO_AUTO_UPDATE` | off | Skip automatic version checks. Not recommended — Claude Code ships frequent changes and cozempic updates keep strategies compatible with the latest session format. |
+| `COZEMPIC_NO_TELEMETRY` | off | Skip anonymous usage counters. Cozempic pings a simple counter on each prune — no personal data, session content, or identifiable information is sent. Helps us prioritize development. |
 
 ## Contributing
 

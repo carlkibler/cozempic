@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json as _json
+import os
 from pathlib import Path as _Path
 
 _SAVINGS_FILE = _Path.home() / ".cozempic_savings.json"
@@ -41,6 +42,8 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
         pass
 
     # Ping global counters (anonymous, no user data, quick with short timeout)
+    if os.environ.get("COZEMPIC_NO_TELEMETRY"):
+        return
     try:
         from urllib.request import Request, urlopen
         urlopen(Request("https://api.counterapi.dev/v1/cozempic/prunes/up",
