@@ -689,14 +689,21 @@ def cmd_init(args):
         print(f"  Hooks added to {hooks['settings_path']}:")
         for h in hooks["added"]:
             print(f"    + {h}")
-        if hooks["backup_path"]:
-            print(f"  Backup: {hooks['backup_path']}")
+    elif hooks["updated"]:
+        print(f"  Hooks updated in {hooks['settings_path']}:")
     else:
         print(f"  Hooks: already configured (nothing to add)")
+
+    if hooks["updated"]:
+        for h in hooks["updated"]:
+            print(f"    ↑ {h} (upgraded)")
 
     if hooks["skipped"]:
         for h in hooks["skipped"]:
             print(f"    ~ {h} (already exists, skipped)")
+
+    if hooks["backup_path"]:
+        print(f"  Backup: {hooks['backup_path']}")
 
     print()
 

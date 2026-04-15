@@ -10,10 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cozempic.doctor import (
+    check_cozempic_hooks,
     check_stale_backups,
     fix_stale_backups,
     run_doctor,
 )
+from cozempic.init import COZEMPIC_HOOKS
 
 
 class TestStaleBackupsScope(unittest.TestCase):
@@ -134,3 +136,28 @@ class TestRunDoctorFixFalse(unittest.TestCase):
             ALL_CHECKS.extend(original)
 
         assert called, "fix_fn was NOT called despite fix=True"
+
+
+class TestCozempicHooksDetection(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.project_dir = Path(self.tmpdir) / "proj"
+        self.project_settings = self.project_dir / ".claude" / "settings.json"
+        self.project_settings.parent.mkdir(parents=True)
+        self.global_dir = Path(self.tmpdir) / "global"
+        self.global_dir.mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_prefers_project_local_settings(self):
+        self.project_settings.write_text(json.dumps({"hooks": COZEMPIC_HOOKS}, indent=2))
+        (self.global_dir / "settings.json").write_text(json.dumps({"hooks": {}}, indent=2))
+
+        with patch("cozempic.doctor.get_claude_dir", return_value=self.global_dir), \
+             patch("os.getcwd", return_value=str(self.project_dir)):
+            result = check_cozempic_hooks()
+
+        assert result.status == "ok"
+        assert "project-local" in result.message

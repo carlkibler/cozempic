@@ -7,6 +7,7 @@ config bugs, oversized sessions, stale backups, and disk usage.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shutil
 from dataclasses import dataclass, field
@@ -26,6 +27,16 @@ class CheckResult:
 
 
 # ─── Checks ──────────────────────────────────────────────────────────────────
+
+
+def _find_project_settings_path(start: str | None = None) -> Path | None:
+    """Find the nearest project-local .claude/settings.json walking upward."""
+    current = Path(start or os.getcwd()).resolve()
+    for candidate in [current, *current.parents]:
+        settings_path = candidate / ".claude" / "settings.json"
+        if settings_path.exists():
+            return settings_path
+    return None
 
 
 def check_trust_dialog_hang() -> CheckResult:
@@ -778,51 +789,75 @@ def check_cozempic_hooks() -> CheckResult:
     hooks are present. Missing hooks mean protection gaps — e.g., no PostCompact
     means team state isn't re-injected after native compaction.
     """
-    claude_dir = get_claude_dir()
-    settings_path = claude_dir / "settings.json"
+    global_settings = get_claude_dir() / "settings.json"
+    project_settings = _find_project_settings_path()
+    settings_paths = []
 
-    if not settings_path.exists():
+    if project_settings.exists():
+        settings_paths.append(project_settings)
+    if global_settings not in settings_paths:
+        settings_paths.append(global_settings)
+
+    if not any(path.exists() for path in settings_paths):
         return CheckResult(
             name="cozempic-hooks",
             status="warning",
-            message="No ~/.claude/settings.json found — no hooks configured",
+            message="No project-local or ~/.claude/settings.json found — no hooks configured",
             fix_description="Run: cozempic init",
         )
 
-    try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        return CheckResult(
-            name="cozempic-hooks",
-            status="warning",
-            message=f"Could not read settings.json: {e}",
-        )
+    expected = {"SessionStart", "PostToolUse", "PreCompact", "PostCompact", "Stop"}
+    best_missing = None
+    best_path = None
 
-    hooks = settings.get("hooks", {})
-    expected = {"SessionStart", "PreCompact", "PostCompact", "Stop"}
-    missing = []
+    for settings_path in settings_paths:
+        if not settings_path.exists():
+            continue
 
-    for event in expected:
-        entries = hooks.get(event, [])
-        has_cozempic = any(
-            "cozempic" in h.get("command", "")
-            for entry in entries
-            for h in entry.get("hooks", [])
-        )
-        if not has_cozempic:
-            missing.append(event)
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            return CheckResult(
+                name="cozempic-hooks",
+                status="warning",
+                message=f"Could not read {settings_path}: {e}",
+            )
 
-    if not missing:
-        return CheckResult(
-            name="cozempic-hooks",
-            status="ok",
-            message="All cozempic hooks are wired (SessionStart, PreCompact, PostCompact, Stop)",
-        )
+        hooks = settings.get("hooks", {})
+        missing = []
+
+        for event in expected:
+            entries = hooks.get(event, [])
+            has_cozempic = any(
+                "cozempic" in h.get("command", "")
+                for entry in entries
+                for h in entry.get("hooks", [])
+            )
+            if not has_cozempic:
+                missing.append(event)
+
+        if not missing:
+            location = "project-local" if settings_path == project_settings else "~/.claude"
+            return CheckResult(
+                name="cozempic-hooks",
+                status="ok",
+                message=(
+                    "All cozempic hooks are wired "
+                    f"(SessionStart, PostToolUse, PreCompact, PostCompact, Stop) in {location} settings"
+                ),
+            )
+
+        if best_missing is None or len(missing) < len(best_missing):
+            best_missing = missing
+            best_path = settings_path
 
     return CheckResult(
         name="cozempic-hooks",
         status="warning",
-        message=f"Missing cozempic hooks: {', '.join(missing)}. Protection gaps exist.",
+        message=(
+            f"Missing cozempic hooks in {best_path}: {', '.join(best_missing or [])}. "
+            "Protection gaps exist."
+        ),
         fix_description="Run: cozempic init",
     )
 
