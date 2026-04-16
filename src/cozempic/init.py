@@ -193,3 +193,47 @@ def run_init(project_dir: str, skip_slash: bool = False) -> dict:
         "hooks": hook_result,
         "slash_command": slash_result,
     }
+
+
+def uninstall_hooks(project_dir: str) -> dict:
+    """Remove cozempic-installed hooks from a settings.json. Idempotent.
+
+    Returns: {removed: list[str], settings_path: str | None, backup_path: str | None}
+    """
+    path = _settings_path(project_dir)
+    if not path.exists():
+        return {"removed": [], "settings_path": None, "backup_path": None}
+
+    settings = _load_settings(path)
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict) or not hooks:
+        return {"removed": [], "settings_path": str(path), "backup_path": None}
+
+    removed: list[str] = []
+    for event in list(hooks.keys()):
+        entries = hooks.get(event, [])
+        if not isinstance(entries, list):
+            continue
+        kept = [e for e in entries if not _is_cozempic_hook(e)]
+        if len(kept) != len(entries):
+            removed.append(event)
+            if kept:
+                hooks[event] = kept
+            else:
+                del hooks[event]
+
+    if not removed:
+        return {"removed": [], "settings_path": str(path), "backup_path": None}
+
+    backup = _backup_settings(path)
+    if hooks:
+        settings["hooks"] = hooks
+    else:
+        settings.pop("hooks", None)
+    _save_settings(path, settings)
+
+    return {
+        "removed": removed,
+        "settings_path": str(path),
+        "backup_path": str(backup) if backup else None,
+    }

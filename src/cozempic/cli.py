@@ -705,15 +705,47 @@ def cmd_doctor(args):
 
 
 def cmd_init(args):
-    """Wire cozempic hooks and slash command into the current project."""
-    project_dir = args.cwd or os.getcwd()
+    """Wire cozempic hooks and slash command into the current project (or globally)."""
+    if getattr(args, "uninstall_global", False):
+        from .init import uninstall_hooks
+        result = uninstall_hooks(str(Path.home()))
+        print("\n  COZEMPIC INIT — UNINSTALL GLOBAL")
+        print("  ═══════════════════════════════════════════════════════════════════")
+        if result.get("removed"):
+            print(f"  Removed {len(result['removed'])} hook(s) from {result['settings_path']}")
+            for h in result["removed"]:
+                print(f"    - {h}")
+            if result.get("backup_path"):
+                print(f"  Backup: {result['backup_path']}")
+        else:
+            print("  No cozempic hooks found in ~/.claude/settings.json — nothing to remove.")
+        # Mark as opted-out so global auto-init doesn't re-fire
+        try:
+            _GLOBAL_INIT_MARKER.touch()
+        except OSError:
+            pass
+        print()
+        return
+
+    if getattr(args, "global_install", False):
+        project_dir = str(Path.home())
+        scope_label = "GLOBAL (~/.claude/)"
+    else:
+        project_dir = args.cwd or os.getcwd()
+        scope_label = f"Project: {project_dir}"
 
     print(f"\n  COZEMPIC INIT")
     print(f"  ═══════════════════════════════════════════════════════════════════")
-    print(f"  Project: {project_dir}")
+    print(f"  {scope_label}")
     print()
 
     result = run_init(project_dir, skip_slash=args.no_slash_command)
+    if getattr(args, "global_install", False):
+        # Mark as initialized so global auto-init doesn't re-fire
+        try:
+            _GLOBAL_INIT_MARKER.touch()
+        except OSError:
+            pass
 
     # Report hooks
     hooks = result["hooks"]
@@ -1020,9 +1052,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_guard.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead token estimate (default: 21000). Increase for heavy configs with many rules files, MCP servers, or large CLAUDE.md")
 
     # init
-    p_init = sub.add_parser("init", help="Auto-wire hooks and slash command into this project")
+    p_init = sub.add_parser("init", help="Auto-wire hooks and slash command into this project (or globally with --global)")
     p_init.add_argument("--cwd", help="Project directory (default: current)")
     p_init.add_argument("--no-slash-command", action="store_true", help="Skip installing /cozempic slash command")
+    p_init.add_argument("--global", dest="global_install", action="store_true", help="Wire hooks into ~/.claude/settings.json so every Claude Code session in every project is protected")
+    p_init.add_argument("--uninstall-global", action="store_true", help="Remove cozempic hooks from ~/.claude/settings.json")
 
     # doctor
     p_doctor = sub.add_parser("doctor", help="Check for known Claude Code issues and fix them")
@@ -1074,9 +1108,13 @@ def _prescan_argv(argv: list[str]) -> list[str]:
     sub_seen = False
     while i < len(argv):
         tok = argv[i]
-        # --no-auto-init can appear anywhere (before or after subcommand)
+        # --no-auto-init / --no-global-init can appear anywhere (before or after subcommand)
         if tok == "--no-auto-init":
             os.environ["COZEMPIC_NO_AUTO_INIT"] = "1"
+            i += 1
+            continue
+        if tok == "--no-global-init":
+            os.environ["COZEMPIC_NO_GLOBAL_INIT"] = "1"
             i += 1
             continue
         if not sub_seen and tok in _SUBCOMMANDS:
@@ -1136,6 +1174,70 @@ _AUTO_INIT_SKIP_CMDS = frozenset({
     "self-update",   # internal upgrade
     "doctor",        # diagnostic-only; doctor surfaces missing init via its own check
 })
+
+_GLOBAL_INIT_MARKER = Path.home() / ".cozempic_global_initialized"
+
+
+def _maybe_global_init(argv: list[str]) -> None:
+    """Wire cozempic into ~/.claude/settings.json on first cozempic invocation
+    on this machine — guarantees protection for every Claude Code session in
+    every project, including projects the user has never run cozempic in.
+
+    Bail-outs (in order):
+      1. COZEMPIC_NO_GLOBAL_INIT=1 in env (also set by --no-global-init)
+      2. Marker file exists (already done once)
+      3. Subcommand is in _AUTO_INIT_SKIP_CMDS
+      4. ~/.claude/ doesn't exist (Claude Code not installed yet)
+      5. Cozempic hooks are already in ~/.claude/settings.json (e.g. plugin
+         marketplace install)
+
+    Otherwise: writes hooks (skip slash command — project-level only) and
+    prints a one-line opt-out notice to stderr. Touches the marker file so
+    we never ask again on this machine.
+    """
+    if os.environ.get("COZEMPIC_NO_GLOBAL_INIT"):
+        return
+    if _GLOBAL_INIT_MARKER.exists():
+        return
+
+    cmd = next((tok for tok in argv if tok in _SUBCOMMANDS), None)
+    if cmd is None or cmd in _AUTO_INIT_SKIP_CMDS:
+        return
+
+    home_claude = Path.home() / ".claude"
+    if not home_claude.exists():
+        return  # Claude Code not yet installed — defer until it is
+
+    if _project_has_cozempic_hooks(home_claude):
+        # Already wired (probably via plugin marketplace install). Mark as done.
+        try:
+            _GLOBAL_INIT_MARKER.touch()
+        except OSError:
+            pass
+        return
+
+    try:
+        result = run_init(str(Path.home()), skip_slash=True)
+    except Exception as exc:
+        print(
+            f"  Cozempic: global auto-init skipped ({exc}). Run `cozempic init --global` manually.",
+            file=sys.stderr,
+        )
+        return
+
+    added = result.get("hooks", {}).get("added", []) or []
+    try:
+        _GLOBAL_INIT_MARKER.touch()
+    except OSError:
+        pass
+
+    if added:
+        print(
+            "  Cozempic: now protecting every Claude Code session globally "
+            f"({len(added)} hook(s) wired into ~/.claude/settings.json). "
+            "Disable with `cozempic init --uninstall-global` or COZEMPIC_NO_GLOBAL_INIT=1.",
+            file=sys.stderr,
+        )
 
 
 def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
@@ -1214,6 +1316,7 @@ def main():
     maybe_auto_update()
 
     argv = _prescan_argv(sys.argv[1:])
+    _maybe_global_init(argv)
     _maybe_auto_init(argv)
     parser = build_parser()
     args = parser.parse_args(argv)
