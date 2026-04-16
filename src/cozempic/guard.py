@@ -1087,7 +1087,10 @@ def _is_cozempic_guard_process(pid: int) -> bool:
     Guards against PID reuse: when our daemon exits and the kernel recycles
     its PID to an unrelated user process, a blind `os.kill(pid, SIGTERM)` on
     the recycled PID is a confused-deputy bug (we'd kill something arbitrary).
-    Inspects the process's argv for "cozempic" + "guard".
+    Inspects the process's argv; requires BOTH "cozempic.cli guard" (matches
+    our spawn pattern in start_guard_daemon) OR the explicit entry-point
+    "cozempic guard" — not just substring "cozempic" + "guard" which could
+    match unrelated things like `vim /tmp/cozempic_guard_notes.md`.
     """
     try:
         result = subprocess.run(
@@ -1097,11 +1100,36 @@ def _is_cozempic_guard_process(pid: int) -> bool:
         if result.returncode != 0:
             return False
         args = (result.stdout or "").strip()
-        return "cozempic" in args and "guard" in args
+        # Match our known spawn patterns:
+        #   python3 -m cozempic.cli guard ...
+        #   cozempic guard ...
+        #   /path/to/cozempic guard ...
+        if "cozempic.cli" in args and "guard" in args:
+            return True
+        if "cozempic" in args.split()[0] if args.split() else False:
+            # First token is cozempic binary path
+            tokens = args.split()
+            if len(tokens) > 1 and tokens[1] == "guard":
+                return True
+        return False
     except (subprocess.SubprocessError, OSError):
         # If we can't verify, err on the side of NOT signaling a potentially
         # unrelated process. The session stays with the existing daemon (or
         # no daemon), which is strictly safer than signaling the wrong one.
+        return False
+
+
+def _pid_file_points_to(session_id: str, expected_pid: int) -> bool:
+    """CAS helper: return True if the session pid file currently contains
+    `expected_pid`. Used before unlink() to avoid clobbering a fresh pid
+    file written by a concurrent SessionStart hook.
+    """
+    try:
+        path = _pid_file_for_session(session_id)
+        if not path.exists():
+            return False
+        return int(path.read_text().strip()) == expected_pid
+    except (ValueError, OSError):
         return False
 
 
@@ -1145,14 +1173,17 @@ def reload_self_daemon(
     # Verify the PID is actually our daemon — defend against PID reuse.
     if not _is_cozempic_guard_process(old_pid):
         # Stale pid file pointing at a recycled (non-cozempic) PID. Clear it
-        # and spawn a fresh daemon; do NOT signal the unrelated process.
-        _pid_file_for_session(session_id).unlink(missing_ok=True)
+        # (only if it still points at the stale pid — CAS) and spawn fresh;
+        # do NOT signal the unrelated process.
+        if _pid_file_points_to(session_id, old_pid):
+            _pid_file_for_session(session_id).unlink(missing_ok=True)
         old_pid = None
     else:
         try:
             os.kill(old_pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
-            _pid_file_for_session(session_id).unlink(missing_ok=True)
+            if _pid_file_points_to(session_id, old_pid):
+                _pid_file_for_session(session_id).unlink(missing_ok=True)
             old_pid = None
 
         if old_pid is not None and not _wait_for_exit(old_pid, timeout=10.0):
@@ -1164,11 +1195,15 @@ def reload_self_daemon(
                     os.kill(old_pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
-            _pid_file_for_session(session_id).unlink(missing_ok=True)
+            # CAS unlink — don't wipe a fresh pid file from a concurrent spawn
+            if _pid_file_points_to(session_id, old_pid):
+                _pid_file_for_session(session_id).unlink(missing_ok=True)
         elif old_pid is not None:
-            # Clean exit — unlink pid file so start_guard_daemon sees a clean state
-            # (guards against PID-reuse false "already_running" on the next spawn).
-            _pid_file_for_session(session_id).unlink(missing_ok=True)
+            # Clean exit. CAS unlink — if a concurrent SessionStart hook
+            # already spawned a new daemon and rewrote the pid file with its
+            # PID, we leave that fresh file alone.
+            if _pid_file_points_to(session_id, old_pid):
+                _pid_file_for_session(session_id).unlink(missing_ok=True)
 
     # Always re-activate what we just disabled. Retry once on transient failures,
     # but NOT on `already_running` (that means a concurrent SessionStart hook
@@ -1188,7 +1223,20 @@ def reload_self_daemon(
     result = start_guard_daemon(**daemon_args)
     if not result.get("started") and not result.get("already_running"):
         time.sleep(1)
-        _pid_file_for_session(session_id).unlink(missing_ok=True)
+        # Only clear a pid file we know is stale (pointing at a dead pid).
+        # Do NOT blindly unlink — a live concurrent daemon may have written it.
+        pid_path = _pid_file_for_session(session_id)
+        try:
+            if pid_path.exists():
+                stale_pid = int(pid_path.read_text().strip())
+                try:
+                    os.kill(stale_pid, 0)
+                    # Still alive — leave the pid file alone and let
+                    # start_guard_daemon below return already_running.
+                except (ProcessLookupError, PermissionError):
+                    pid_path.unlink(missing_ok=True)
+        except (ValueError, OSError):
+            pid_path.unlink(missing_ok=True)
         result = start_guard_daemon(**daemon_args)
 
     reloaded = bool(result.get("started") or result.get("already_running"))

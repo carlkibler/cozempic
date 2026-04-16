@@ -749,18 +749,21 @@ def cmd_init(args):
 
     # Report hooks
     hooks = result["hooks"]
-    if hooks["added"]:
-        print(f"  Hooks added to {hooks['settings_path']}:")
+    updated = hooks.get("updated") or []
+    if hooks["added"] or updated:
+        print(f"  Hooks wired in {hooks['settings_path']}:")
         for h in hooks["added"]:
-            print(f"    + {h}")
+            print(f"    + {h} (added)")
+        for h in updated:
+            print(f"    → {h} (refreshed from stale schema)")
         if hooks["backup_path"]:
             print(f"  Backup: {hooks['backup_path']}")
     else:
-        print(f"  Hooks: already configured (nothing to add)")
+        print(f"  Hooks: already at current schema (nothing to add or update)")
 
     if hooks["skipped"]:
         for h in hooks["skipped"]:
-            print(f"    ~ {h} (already exists, skipped)")
+            print(f"    ~ {h} (current, skipped)")
 
     print()
 
@@ -1186,30 +1189,41 @@ def _prompt_with_timeout(msg: str, timeout: int = 30, default: str = "n") -> str
     against fooled detection (tmux piping quirks, etc.).
     """
     import signal as _signal
+
     def _timeout_handler(signum, frame):
         raise TimeoutError
-    prev_handler = None
+
     try:
         prev_handler = _signal.signal(_signal.SIGALRM, _timeout_handler)
-        _signal.alarm(timeout)
-        try:
-            return input(msg).strip().lower()
-        except (EOFError, KeyboardInterrupt, TimeoutError):
-            print("", file=sys.stderr)
-            return default
     except (ValueError, OSError, AttributeError):
-        # SIGALRM unavailable (Windows, non-main thread) — fall back to no timeout
+        # SIGALRM unavailable (Windows, non-main thread) — run without timeout
         try:
             return input(msg).strip().lower()
         except (EOFError, KeyboardInterrupt):
             return default
+
+    _signal.alarm(timeout)
+    try:
+        result = input(msg)
+    except (EOFError, KeyboardInterrupt, TimeoutError):
+        result = None
     finally:
+        # Cancel the alarm FIRST so a race between input() returning and the
+        # finally block can't cause SIGALRM to fire during cleanup. Only then
+        # restore the previous handler.
         try:
             _signal.alarm(0)
-            if prev_handler is not None:
-                _signal.signal(_signal.SIGALRM, prev_handler)
-        except (ValueError, OSError, AttributeError):
+        except (ValueError, OSError):
             pass
+        try:
+            _signal.signal(_signal.SIGALRM, prev_handler)
+        except (ValueError, OSError):
+            pass
+
+    if result is None:
+        print("", file=sys.stderr)
+        return default
+    return result.strip().lower()
 
 
 def _maybe_global_init(argv: list[str]) -> None:
@@ -1309,18 +1323,27 @@ def _maybe_global_init(argv: list[str]) -> None:
         )
         return
 
-    added = result.get("hooks", {}).get("added", []) or []
+    hooks_result = result.get("hooks", {})
+    added = hooks_result.get("added", []) or []
+    updated = hooks_result.get("updated", []) or []
     try:
         _GLOBAL_INIT_MARKER.touch()
     except OSError:
         pass
 
-    if not added:
+    if not (added or updated):
         return
+
+    count_desc = []
+    if added:
+        count_desc.append(f"{len(added)} new")
+    if updated:
+        count_desc.append(f"{len(updated)} refreshed")
+    summary = ", ".join(count_desc)
 
     if interactive:
         print(
-            f"  Cozempic enabled — {len(added)} hook(s) wired into ~/.claude/settings.json.",
+            f"  Cozempic enabled — {summary} hook(s) wired into ~/.claude/settings.json.",
             file=sys.stderr,
         )
         print(
@@ -1329,22 +1352,25 @@ def _maybe_global_init(argv: list[str]) -> None:
             file=sys.stderr,
         )
     else:
-        # Non-interactive: terse one-line notice
         print(
             f"  Cozempic: protecting every Claude Code session globally "
-            f"({len(added)} hook(s) wired into ~/.claude/settings.json). "
+            f"({summary} hook(s) wired into ~/.claude/settings.json). "
             "Disable with `cozempic init --uninstall-global` or COZEMPIC_NO_GLOBAL_INIT=1.",
             file=sys.stderr,
         )
 
 
 def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
-    """Return True if any settings file under .claude/ has cozempic hooks AT THE
-    CURRENT SCHEMA VERSION. Returns False (=> needs refresh) when hooks exist
-    but are stale, so auto-init can upgrade them.
+    """Return True iff the project already has cozempic hooks AT THE CURRENT
+    SCHEMA VERSION across ALL settings files that contain any cozempic hooks.
+
+    If one file has current-schema hooks and another has stale cozempic hooks,
+    we return False so auto-init runs wire_hooks and refreshes the stale one.
     """
     import json as _json
-    from .init import has_current_schema
+    from .init import has_current_schema, _is_cozempic_command
+
+    any_cozempic_found = False
     for name in ("settings.json", "settings.local.json"):
         p = claude_dir / name
         if not p.exists():
@@ -1353,9 +1379,40 @@ def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
             data = _json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if has_current_schema(data):
-            return True
-    return False
+
+        hooks = data.get("hooks", {}) or {}
+        if not isinstance(hooks, dict):
+            continue
+
+        file_has_any_cozempic = False
+        file_has_stale_cozempic = False
+        for entries in hooks.values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for h in entry.get("hooks", []) or []:
+                    if not isinstance(h, dict):
+                        continue
+                    cmd = str(h.get("command", ""))
+                    if _is_cozempic_command(cmd):
+                        file_has_any_cozempic = True
+                        any_cozempic_found = True
+                        if "cozempic-hook-schema=" not in cmd or not has_current_schema({"hooks": {"x": [entry]}}):
+                            # Either no schema marker, or an old schema version
+                            if "cozempic-hook-schema=" in cmd:
+                                # Parse out the version from the marker to compare
+                                from .init import HOOK_SCHEMA_MARKER
+                                if HOOK_SCHEMA_MARKER not in cmd:
+                                    file_has_stale_cozempic = True
+                            else:
+                                file_has_stale_cozempic = True
+
+        if file_has_any_cozempic and file_has_stale_cozempic:
+            return False  # Stale hooks in some file → refresh needed
+
+    return any_cozempic_found
 
 
 def _maybe_auto_init(argv: list[str]) -> None:
@@ -1393,10 +1450,17 @@ def _maybe_auto_init(argv: list[str]) -> None:
         )
         return
 
-    added = result.get("hooks", {}).get("added", []) or []
-    if added:
+    hooks_result = result.get("hooks", {})
+    added = hooks_result.get("added", []) or []
+    updated = hooks_result.get("updated", []) or []
+    if added or updated:
+        parts = []
+        if added:
+            parts.append(f"{len(added)} hook(s) wired")
+        if updated:
+            parts.append(f"{len(updated)} refreshed from stale schema")
         print(
-            f"  Cozempic: auto-initialized this project ({len(added)} hook(s) wired). "
+            f"  Cozempic: auto-initialized this project ({', '.join(parts)}). "
             "Disable with --no-auto-init or COZEMPIC_NO_AUTO_INIT=1.",
             file=sys.stderr,
         )

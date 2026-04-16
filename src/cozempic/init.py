@@ -39,7 +39,7 @@ def _c(args: str) -> str:
 # at the end of every canonical hook command (e.g. "# cozempic-hook-schema=v2")
 # is what `_is_current_cozempic_hook` looks for — old hooks without the current
 # marker are treated as stale and get refreshed on next init.
-HOOK_SCHEMA_VERSION = "v2"
+HOOK_SCHEMA_VERSION = "v3"
 HOOK_SCHEMA_MARKER = f"cozempic-hook-schema={HOOK_SCHEMA_VERSION}"
 
 
@@ -178,11 +178,21 @@ class _SettingsLock:
         try:
             import fcntl
             self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            self._fh = open(self.lock_path, "w")
+            # Open append-mode so two racing opens don't truncate each other; the
+            # lock file content is irrelevant — we only use the fd for flock.
+            self._fh = open(self.lock_path, "a")
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            # Windows / unusual filesystems — skip locking, best-effort
+        except ImportError:
+            # Windows — fcntl unavailable. Proceed without locking; this is a
+            # documented single-user tool and cross-shell races are rare there.
             self._fh = None
+        except OSError as exc:
+            # Permission error (read-only .claude/), disk full, etc. Degrade to
+            # unlocked but warn — silent skipping would hide real setup problems.
+            self._fh = None
+            sys.stderr.write(
+                f"  Cozempic: settings lock unavailable ({exc}); proceeding without concurrency guard.\n"
+            )
         return self
 
     def __exit__(self, exc_type, exc, tb):
