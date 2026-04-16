@@ -771,6 +771,58 @@ def check_agent_model_mismatch() -> CheckResult:
     )
 
 
+def check_cozempic_project_init() -> CheckResult:
+    """Check that the current working directory's .claude/ has cozempic hooks wired.
+
+    Distinct from check_cozempic_hooks (which inspects ~/.claude/settings.json,
+    user-global). This one verifies that the *current project* will start the
+    guard daemon on its next session — the most common silent-failure mode
+    (user pip-installed cozempic but never ran `cozempic init` in this project).
+    """
+    from pathlib import Path
+    claude_dir = Path.cwd() / ".claude"
+    if not claude_dir.exists():
+        return CheckResult(
+            name="cozempic-project-init",
+            status="ok",
+            message="Not a Claude project (no .claude/ in cwd) — skipping",
+        )
+
+    found = False
+    for name in ("settings.json", "settings.local.json"):
+        p = claude_dir / name
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        hooks = data.get("hooks", {}) or {}
+        for entries in hooks.values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for h in entry.get("hooks", []) or []:
+                    if "cozempic" in str(h.get("command", "")):
+                        found = True
+                        break
+
+    if found:
+        return CheckResult(
+            name="cozempic-project-init",
+            status="ok",
+            message="Project is initialized — cozempic hooks present in .claude/",
+        )
+    return CheckResult(
+        name="cozempic-project-init",
+        status="warning",
+        message="Current project is NOT initialized. Guard daemon will not start on session.",
+        fix_description="Run: cozempic init (or run any cozempic command — auto-init wires it on first use)",
+    )
+
+
 def check_cozempic_hooks() -> CheckResult:
     """Check that all expected cozempic hooks are wired in settings.json.
 
@@ -947,6 +999,7 @@ ALL_CHECKS: list[tuple[str, callable, callable | None]] = [
     ("trust-dialog-hang", check_trust_dialog_hang, fix_trust_dialog_hang),
     ("hooks-trust-flag", check_hooks_trust_flag, fix_hooks_trust_flag),
     ("cozempic-hooks", check_cozempic_hooks, None),
+    ("cozempic-project-init", check_cozempic_project_init, None),
     ("claude-json-corruption", check_claude_json_corruption, fix_claude_json_corruption),
     ("corrupted-tool-use", check_corrupted_tool_use, fix_corrupted_tool_use),
     ("orphaned-tool-results", check_orphaned_tool_results, fix_orphaned_tool_results),

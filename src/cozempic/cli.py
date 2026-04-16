@@ -1065,6 +1065,8 @@ def _prescan_argv(argv: list[str]) -> list[str]:
 
     Argparse requires root-level flags before the subcommand name; this lets users
     put --context-window and --system-overhead-tokens anywhere (#13).
+    Also strips --no-auto-init (sets COZEMPIC_NO_AUTO_INIT=1 as a side effect) so
+    auto-init can opt out per-invocation regardless of where the flag appears.
     Returns cleaned argv with those flags removed so argparse sees the rest normally.
     """
     cleaned: list[str] = []
@@ -1072,6 +1074,11 @@ def _prescan_argv(argv: list[str]) -> list[str]:
     sub_seen = False
     while i < len(argv):
         tok = argv[i]
+        # --no-auto-init can appear anywhere (before or after subcommand)
+        if tok == "--no-auto-init":
+            os.environ["COZEMPIC_NO_AUTO_INIT"] = "1"
+            i += 1
+            continue
         if not sub_seen and tok in _SUBCOMMANDS:
             sub_seen = True
             cleaned.append(tok)
@@ -1123,12 +1130,91 @@ def _prescan_argv(argv: list[str]) -> list[str]:
     return cleaned
 
 
+_AUTO_INIT_SKIP_CMDS = frozenset({
+    "init",          # would loop / shadow user intent
+    "completions",   # generates shell completion, no project state needed
+    "self-update",   # internal upgrade
+    "doctor",        # diagnostic-only; doctor surfaces missing init via its own check
+})
+
+
+def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
+    """Return True if any settings file under .claude/ already references cozempic in a hook."""
+    import json as _json
+    for name in ("settings.json", "settings.local.json"):
+        p = claude_dir / name
+        if not p.exists():
+            continue
+        try:
+            data = _json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        hooks = data.get("hooks", {})
+        if not isinstance(hooks, dict):
+            continue
+        for entries in hooks.values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for h in entry.get("hooks", []) or []:
+                    if "cozempic" in str(h.get("command", "")):
+                        return True
+    return False
+
+
+def _maybe_auto_init(argv: list[str]) -> None:
+    """Auto-wire cozempic into the current Claude project on first use.
+
+    Bail-outs (in order):
+      1. COZEMPIC_NO_AUTO_INIT=1 in env (also set by --no-auto-init via _prescan_argv)
+      2. cwd has no .claude/ directory (not a Claude project)
+      3. Subcommand is in _AUTO_INIT_SKIP_CMDS or no subcommand was given
+      4. Cozempic hooks are already wired in this project's settings
+
+    Otherwise: runs init silently and prints a single one-line notice to stderr.
+    Failures are non-fatal — the user's original command still runs.
+    """
+    if os.environ.get("COZEMPIC_NO_AUTO_INIT"):
+        return
+
+    claude_dir = Path.cwd() / ".claude"
+    if not claude_dir.exists():
+        return  # not a Claude project — never modify foreign directories
+
+    cmd = next((tok for tok in argv if tok in _SUBCOMMANDS), None)
+    if cmd is None or cmd in _AUTO_INIT_SKIP_CMDS:
+        return
+
+    if _project_has_cozempic_hooks(claude_dir):
+        return  # already initialized
+
+    try:
+        result = run_init(str(Path.cwd()))
+    except Exception as exc:
+        print(
+            f"  Cozempic: auto-init skipped ({exc}). Run `cozempic init` manually to enable background protection.",
+            file=sys.stderr,
+        )
+        return
+
+    added = result.get("hooks", {}).get("added", []) or []
+    if added:
+        print(
+            f"  Cozempic: auto-initialized this project ({len(added)} hook(s) wired). "
+            "Disable with --no-auto-init or COZEMPIC_NO_AUTO_INIT=1.",
+            file=sys.stderr,
+        )
+
+
 def main():
     from .updater import maybe_auto_update, ping_install_if_new
     ping_install_if_new()
     maybe_auto_update()
 
     argv = _prescan_argv(sys.argv[1:])
+    _maybe_auto_init(argv)
     parser = build_parser()
     args = parser.parse_args(argv)
 

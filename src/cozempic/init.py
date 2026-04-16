@@ -28,98 +28,24 @@ def _c(args: str) -> str:
 
 
 # ─── Hook definitions ────────────────────────────────────────────────────────
+# The canonical source is src/cozempic/data/hooks.json (also shipped to
+# users via the plugin marketplace as plugin/hooks/hooks.json — kept in sync
+# by tests/test_hooks_sync.py). Editing the dict literal that used to live
+# here is gone; edit the JSON file instead.
 
-COZEMPIC_HOOKS = {
-    "SessionStart": [
-        {
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": (
-                        "INPUT=$(cat); "
-                        "SESSION_ID=$(echo \"$INPUT\" | python3 -c \"import sys,json; print(json.load(sys.stdin).get('session_id',''))\" 2>/dev/null); "
-                        "TRANSCRIPT=$(echo \"$INPUT\" | python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); "
-                        "{ uv pip install --upgrade cozempic --quiet 2>/dev/null || "
-                        "pip install --upgrade cozempic --quiet --disable-pip-version-check 2>/dev/null; } & "
-                        + _c("guard --daemon ${TRANSCRIPT:+--session $TRANSCRIPT}") + " || true; "
-                        + _c("digest inject ${TRANSCRIPT:+--session $TRANSCRIPT}") + " || true"
-                    ),
-                }
-            ],
-        },
-    ],
-    "PostToolUse": [
-        {
-            "matcher": "Task",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "{ cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true",
-                }
-            ],
-        },
-        {
-            "matcher": "TaskCreate|TaskUpdate",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "{ cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true",
-                }
-            ],
-        },
-        {
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "{ cozempic remind 2>/dev/null || python3 -m cozempic remind 2>/dev/null; } || true",
-                }
-            ],
-        },
-    ],
-    "PreCompact": [
-        {
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": (
-                        "TRANSCRIPT=$(cat | python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); "
-                        "{ cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true; "
-                        "{ cozempic digest flush ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null || python3 -m cozempic digest flush ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null; } || true"
-                    ),
-                }
-            ],
-        },
-    ],
-    "PostCompact": [
-        {
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "{ cozempic post-compact 2>/dev/null || python3 -m cozempic post-compact 2>/dev/null; } || true; { cozempic digest inject 2>/dev/null || python3 -m cozempic digest inject 2>/dev/null; } || true",
-                }
-            ],
-        },
-    ],
-    "Stop": [
-        {
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": (
-                        "TRANSCRIPT=$(cat | python3 -c \"import sys,json; print(json.load(sys.stdin).get('transcript_path',''))\" 2>/dev/null); "
-                        "{ cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true; "
-                        "{ cozempic digest flush ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null || python3 -m cozempic digest flush ${TRANSCRIPT:+--session $TRANSCRIPT} 2>/dev/null; } || true"
-                    ),
-                }
-            ],
-        },
-    ],
-}
+
+def _load_canonical_hooks() -> dict:
+    """Load the canonical hook definitions bundled with the package."""
+    try:
+        from importlib.resources import files
+        data = files("cozempic").joinpath("data/hooks.json").read_text(encoding="utf-8")
+    except Exception:
+        # Fallback for older Python or unusual install layouts
+        data = (Path(__file__).parent / "data" / "hooks.json").read_text(encoding="utf-8")
+    return json.loads(data).get("hooks", {})
+
+
+COZEMPIC_HOOKS = _load_canonical_hooks()
 
 
 # ─── Core logic ──────────────────────────────────────────────────────────────
