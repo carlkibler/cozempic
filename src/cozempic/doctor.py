@@ -774,20 +774,22 @@ def check_agent_model_mismatch() -> CheckResult:
 def check_cozempic_daemon_running() -> CheckResult:
     """Report whether a cozempic guard daemon is running for the current session.
 
-    Looks for an alive PID in /tmp/cozempic_guard_*.pid — if none is live,
-    background protection isn't active for this session even if the hooks
-    are wired.
+    Verifies via `_is_cozempic_guard_process` (ps argv match) so a PID-reused
+    stranger process doesn't produce a false-positive "daemon running".
     """
     from pathlib import Path as _Path
     import os as _os, glob as _glob
+    from .guard import _is_cozempic_guard_process
     pids_alive: list[int] = []
     for pidf in _glob.glob("/tmp/cozempic_guard_*.pid"):
         try:
             pid = int(_Path(pidf).read_text().strip())
             _os.kill(pid, 0)
-            pids_alive.append(pid)
         except (OSError, ValueError):
             continue
+        # Verify this PID is actually our guard (not a PID-reused stranger)
+        if _is_cozempic_guard_process(pid):
+            pids_alive.append(pid)
     if pids_alive:
         return CheckResult(
             name="cozempic-daemon-running",

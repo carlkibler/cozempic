@@ -42,6 +42,11 @@ from .session import (
 )
 from .team import TeamState, extract_team_state, inject_team_recovery, write_team_checkpoint
 from .tokens import default_token_thresholds, quick_token_estimate
+# Eager import: ensures the daemon's upgrade check uses code from the daemon's
+# OWN install state (frozen at import time), not whatever happens to be on
+# disk when this function runs post-upgrade. Prevents old-daemon/new-updater
+# version skew.
+from .updater import maybe_auto_update, ping_install_if_new
 
 
 def _normalize_session_id(session_id: str) -> str:
@@ -288,7 +293,6 @@ def start_guard(
     _cleanup_stale_watchers()
 
     # Auto-update check — force=True so it works even when guard runs via hook (no TTY)
-    from .updater import maybe_auto_update, ping_install_if_new
     ping_install_if_new()
     maybe_auto_update(force=True)
 

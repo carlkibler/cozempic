@@ -1269,7 +1269,7 @@ def _maybe_global_init(argv: list[str]) -> None:
     if not home_claude.exists():
         return  # Claude Code not yet installed — defer until it is
 
-    if _project_has_cozempic_hooks(home_claude):
+    if _project_is_cozempic_current(home_claude):
         # Already wired (probably via plugin marketplace install). Mark as done.
         try:
             _GLOBAL_INIT_MARKER.touch()
@@ -1297,7 +1297,9 @@ def _maybe_global_init(argv: list[str]) -> None:
         except OSError:
             response = ""  # treat fd errors as "go ahead silently"
 
-        if response in ("n", "no"):
+        # Accept common "cancel" synonyms so users who press q/quit/cancel
+        # don't accidentally opt IN.
+        if response in ("n", "no", "q", "quit", "cancel", "exit", "x"):
             try:
                 _GLOBAL_INIT_MARKER.touch()
             except OSError:
@@ -1374,12 +1376,16 @@ def _maybe_global_init(argv: list[str]) -> None:
         )
 
 
-def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
-    """Return True iff the project already has cozempic hooks AT THE CURRENT
-    SCHEMA VERSION across ALL settings files that contain any cozempic hooks.
+def _project_is_cozempic_current(claude_dir: Path) -> bool:
+    """Predicate: "should we leave this settings dir alone?"
 
-    If one file has current-schema hooks and another has stale cozempic hooks,
-    return False so auto-init runs wire_hooks and refreshes the stale one.
+    Returns True iff the settings files (settings.json + settings.local.json)
+    already have cozempic hooks AT THE CURRENT SCHEMA VERSION and none are
+    stale. Returns False when refresh OR initial install is needed.
+
+    NOTE: This is a "do nothing" predicate, not a "has any cozempic config"
+    query. If one file is current and another has stale cozempic hooks, we
+    return False so wire_hooks is called and refreshes the stale one.
     """
     import json as _json
     from .init import _is_cozempic_command, HOOK_SCHEMA_MARKER
@@ -1442,7 +1448,7 @@ def _maybe_auto_init(argv: list[str]) -> None:
     if cmd is None or cmd in _AUTO_INIT_SKIP_CMDS:
         return
 
-    if _project_has_cozempic_hooks(claude_dir):
+    if _project_is_cozempic_current(claude_dir):
         return  # already initialized
 
     try:

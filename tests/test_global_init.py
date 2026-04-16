@@ -257,19 +257,33 @@ class TestStaleHookRefresh(unittest.TestCase):
         """A user-authored chain command like `cozempic checkpoint && backup.sh`
         must NOT be classified as cozempic-installed (bug 1.4). Previously the
         substring-match fallback would false-match and `uninstall_hooks` would
-        delete the user's backup script."""
+        delete the user's backup script.
+
+        Also covers the secondary regression (bug 7.1 from round-3 audit): a
+        user chain `pre; python3 -m cozempic X; post` must NOT match either —
+        requires the FULL canonical wrapper shape (brace-open + python
+        fallback), not just one or the other.
+        """
         from cozempic.init import _is_cozempic_command
-        # Chain with cozempic + user step — should NOT match (no python fallback)
+        # Chain with cozempic + user step — no wrapper, no match
         self.assertFalse(_is_cozempic_command("cozempic checkpoint && my-backup.sh"))
-        # User hook referencing cozempic in a string — should NOT match
+        # User hook referencing cozempic in a string — no match
         self.assertFalse(_is_cozempic_command('echo "cozempic notes" > /tmp/out'))
+        # User chain that includes `python3 -m cozempic` — still no match
+        # (was a false positive in the prior fix). Lacks `{ cozempic ` opener.
+        self.assertFalse(_is_cozempic_command(
+            "pre-step && python3 -m cozempic checkpoint && post-step"
+        ))
+        self.assertFalse(_is_cozempic_command(
+            "my-script.sh; python3 -m cozempic digest flush"
+        ))
         # A real canonical hook with the python fallback wrapper — SHOULD match
         self.assertTrue(_is_cozempic_command(
             "{ cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true"
         ))
-        # A v3+ hook with the schema marker — SHOULD match
+        # A v4+ hook with the schema marker — SHOULD match
         self.assertTrue(_is_cozempic_command(
-            "echo 'hi' # cozempic-hook-schema=v3"
+            "echo 'hi' # cozempic-hook-schema=v4"
         ))
 
     def test_refresh_preserves_user_command_in_mixed_entry(self):
@@ -335,6 +349,58 @@ class TestPIDReuseCheck(unittest.TestCase):
         from cozempic.guard import _is_cozempic_guard_process
         # Almost certainly not a real PID
         self.assertFalse(_is_cozempic_guard_process(999999))
+
+
+class TestAtomicWrite(unittest.TestCase):
+    def test_save_settings_is_atomic_on_json_error(self):
+        """If json serialization raises mid-write, the existing settings.json
+        must remain intact (atomic write via tempfile + os.replace)."""
+        from cozempic.init import _save_settings
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".claude").mkdir()
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.write_text('{"existing": "config"}')
+            original = path.read_text()
+
+            # Try to write something non-serializable — should fail without
+            # touching the original file.
+            class NotJsonable:
+                pass
+            try:
+                _save_settings(path, {"bad": NotJsonable()})
+            except TypeError:
+                pass
+            else:
+                self.fail("expected TypeError from non-serializable value")
+
+            # Original file must still be intact
+            self.assertEqual(path.read_text(), original)
+            # No tempfile left behind
+            temps = list(Path(tmp, ".claude").glob(".cozempic-settings-*"))
+            self.assertEqual(temps, [], f"tempfile not cleaned up: {temps}")
+
+    def test_save_settings_writes_successfully(self):
+        """Normal save path must produce the expected content at the target path."""
+        from cozempic.init import _save_settings
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            _save_settings(path, {"hooks": {"SessionStart": []}})
+            loaded = json.loads(path.read_text())
+            self.assertEqual(loaded, {"hooks": {"SessionStart": []}})
+
+
+class TestWireHooksGracefulParseFailure(unittest.TestCase):
+    def test_malformed_settings_returns_error_not_crash(self):
+        """wire_hooks on malformed JSON returns error field instead of raising."""
+        from cozempic.init import wire_hooks
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".claude").mkdir()
+            (Path(tmp) / ".claude" / "settings.json").write_text("{not valid")
+            result = wire_hooks(tmp)
+            self.assertEqual(result["added"], [])
+            self.assertEqual(result["updated"], [])
+            self.assertIn("error", result)
+            self.assertIn("could not parse", result["error"])
 
 
 class TestDoSMarkerOnFailure(unittest.TestCase):

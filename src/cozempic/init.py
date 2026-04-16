@@ -39,7 +39,7 @@ def _c(args: str) -> str:
 # at the end of every canonical hook command (e.g. "# cozempic-hook-schema=v2")
 # is what `_is_current_cozempic_hook` looks for — old hooks without the current
 # marker are treated as stale and get refreshed on next init.
-HOOK_SCHEMA_VERSION = "v3"
+HOOK_SCHEMA_VERSION = "v4"
 HOOK_SCHEMA_MARKER = f"cozempic-hook-schema={HOOK_SCHEMA_VERSION}"
 
 
@@ -92,20 +92,28 @@ def _is_cozempic_command(command: str) -> bool:
 
     Detection order:
       1. `cozempic-hook-schema=<ver>` marker (v2+ installs)
-      2. `python3 -m cozempic` fallback wrapper (present in every hook we've
-         ever installed — canonical pattern is `cozempic X || python3 -m cozempic X`).
+      2. Our FULL canonical wrapper shape — requires both a `{ cozempic <word> `
+         opener AND a `python3 -m cozempic` (or `python -m cozempic`) fallback
+         in the same command. That pair is distinctive to our template.
 
-    Explicitly does NOT match on bare "cozempic" substring: that false-matches
-    user-authored chain commands like `cozempic checkpoint && my-backup.sh`,
-    silently eating the user's backup script during uninstall/refresh. The
-    `python3 -m cozempic` fallback-wrapper pattern is distinctive enough that
-    user authored commands don't typically contain it.
+    Explicitly does NOT match:
+      - Bare `"cozempic" in command` — false-matches user chains like
+        `cozempic checkpoint && my-backup.sh`.
+      - Bare `"python3 -m cozempic" in command` — false-matches user chains
+        like `pre-step; python3 -m cozempic checkpoint; post-step` which would
+        silently lose pre-step and post-step on uninstall.
+
+    Net effect: user-authored commands that happen to invoke cozempic inline
+    are left alone; only commands produced by our `_c()` template / canonical
+    hooks.json entries are recognized as ours.
     """
     if "cozempic-hook-schema=" in command:
         return True
-    if "python3 -m cozempic" in command or "python -m cozempic" in command:
-        return True
-    return False
+    has_wrapper_open = "{ cozempic " in command
+    has_python_fallback = (
+        "python3 -m cozempic" in command or "python -m cozempic" in command
+    )
+    return has_wrapper_open and has_python_fallback
 
 
 def _is_current_cozempic_command(command: str) -> bool:
@@ -164,11 +172,39 @@ def _backup_settings(path: Path) -> Path | None:
 
 
 def _save_settings(path: Path, settings: dict) -> None:
-    """Write settings.json with consistent formatting."""
+    """Write settings.json atomically.
+
+    Writes to a tempfile alongside the target, fsyncs, then os.replace onto the
+    real path. Crash-safe: a Ctrl-C / OOM-kill / power-loss mid-write leaves
+    settings.json in its PREVIOUS state, not zeroed or half-written. Previously
+    we opened path for "w" (truncate-in-place) which could wipe the user's
+    entire Claude Code config on a bad interrupt.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2)
-        f.write("\n")
+    import os as _os, tempfile as _tempfile
+    fd, tmp_name = _tempfile.mkstemp(
+        prefix=".cozempic-settings-", suffix=".tmp", dir=str(path.parent)
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with _os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+            f.write("\n")
+            f.flush()
+            try:
+                _os.fsync(f.fileno())
+            except OSError:
+                # fsync not supported on some filesystems — atomicity still
+                # provided by os.replace(), just without durability guarantee.
+                pass
+        _os.replace(tmp_path, path)
+    except Exception:
+        # Cleanup on failure; never leave a half-written tempfile behind.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 class _SettingsLock:
@@ -189,13 +225,16 @@ class _SettingsLock:
         try:
             import fcntl
             self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            # Open append-mode so two racing opens don't truncate each other; the
-            # lock file content is irrelevant — we only use the fd for flock.
+            # Append mode so two racing opens don't truncate each other; the
+            # lock file content is irrelevant — we only use the fd for locking.
             self._fh = open(self.lock_path, "a")
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+            # Use lockf (POSIX record locks) not flock: lockf works reliably
+            # over NFS, whereas flock on NFSv3 historically silent-no-ops
+            # (returns success without actually locking), which would let two
+            # init runs clobber each other on network homes.
+            fcntl.lockf(self._fh.fileno(), fcntl.LOCK_EX)
         except ImportError:
-            # Windows — fcntl unavailable. Proceed without locking; this is a
-            # documented single-user tool and cross-shell races are rare there.
+            # Windows — fcntl unavailable. Proceed without locking.
             self._fh = None
         except OSError as exc:
             # Permission error (read-only .claude/), disk full, etc. Degrade to
@@ -210,7 +249,7 @@ class _SettingsLock:
         if self._fh is not None:
             try:
                 import fcntl
-                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                fcntl.lockf(self._fh.fileno(), fcntl.LOCK_UN)
             except (ImportError, OSError):
                 pass
             try:
@@ -243,7 +282,17 @@ def wire_hooks(project_dir: str) -> dict:
         }
 
     with _SettingsLock(path):
-        settings = _load_settings(path)
+        try:
+            settings = _load_settings(path)
+        except (OSError, json.JSONDecodeError) as exc:
+            # Malformed or unreadable settings.json — don't crash cmd_init with
+            # a raw traceback. Surface via the `error` field like uninstall does.
+            return {
+                "added": [], "updated": [], "skipped": [],
+                "settings_path": str(path),
+                "backup_path": None,
+                "error": f"could not parse {path}: {exc}. Back up + fix the file, then rerun.",
+            }
         hooks = settings.setdefault("hooks", {})
 
         added: list[str] = []
