@@ -1,0 +1,22 @@
+# Maintainer: Ruya <j@junaidq.com>
+pkgname=cozempic
+pkgver=1.7.1
+pkgrel=1
+pkgdesc="Context cleaning CLI for Claude Code — prune bloat, protect agent teams from compaction"
+arch=('any')
+url="https://github.com/Ruya-AI/cozempic"
+license=('MIT')
+depends=('python>=3.10')
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+source=("https://files.pythonhosted.org/packages/source/c/cozempic/cozempic-${pkgver}.tar.gz")
+sha256sums=('9878ca1e0ddde69b478d66f0ce0b4d5abb49ecc105f493e51fffa0a738436a88')
+
+build() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  python -m installer --destdir="${pkgdir}" dist/*.whl
+}

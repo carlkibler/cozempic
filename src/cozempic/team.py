@@ -704,6 +704,23 @@ def inject_team_recovery(messages: list[Message], state: TeamState) -> list[Mess
         "A team state checkpoint was also written to .claude/team-checkpoint.md."
     )
 
+    # Terse confirmation summary — avoid echoing the full team state back.
+    summary_bits = []
+    if state.team_name:
+        summary_bits.append(f"team={state.team_name}")
+    if state.teammates:
+        summary_bits.append(f"{len(state.teammates)} teammate(s)")
+    if state.subagents:
+        summary_bits.append(f"{len(state.subagents)} subagent(s)")
+    if state.tasks:
+        pending = sum(1 for t in state.tasks if t.status.lower() == "pending")
+        in_progress = sum(1 for t in state.tasks if t.status.lower() == "in_progress")
+        task_bit = f"{len(state.tasks)} task(s)"
+        if pending or in_progress:
+            task_bit += f" ({pending} pending, {in_progress} in progress)"
+        summary_bits.append(task_bit)
+    summary = ", ".join(summary_bits) if summary_bits else "state restored"
+
     # User message: trigger for team state recovery
     user_msg = {
         "type": "user",
@@ -718,8 +735,9 @@ def inject_team_recovery(messages: list[Message], state: TeamState) -> list[Mess
         "message": {
             "role": "user",
             "content": (
-                "[Cozempic Guard: Context was pruned to prevent compaction. "
-                "Confirm the current agent team state below.]\n\n"
+                "[Cozempic Guard: context was pruned. Team state restored below "
+                "for your reference — do not echo it back, just acknowledge briefly "
+                "and continue.]\n\n"
                 f"{recovery_text}"
             ),
         },
@@ -742,9 +760,8 @@ def inject_team_recovery(messages: list[Message], state: TeamState) -> list[Mess
                 {
                     "type": "text",
                     "text": (
-                        f"Confirmed — I have an active agent team. {recovery_text}\n\n"
-                        f"{checkpoint_note}\n\n"
-                        "Continuing with team coordination."
+                        f"Team state restored ({summary}). {checkpoint_note} "
+                        "Continuing."
                     ),
                 }
             ],

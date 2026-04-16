@@ -28,8 +28,30 @@ Cozempic removes it with **17 composable strategies** across 3 prescription tier
 
 ## Install
 
+Pick your package manager:
+
 ```bash
+# pip (Python ≥ 3.10)
 pip install cozempic
+
+# pipx — isolated user install, always available on PATH
+pipx install cozempic
+
+# uv / uvx — no install needed, run on demand
+uvx cozempic --help
+
+# Homebrew (macOS / Linux)
+brew install Ruya-AI/cozempic/cozempic
+
+# Nix flake
+nix profile install github:Ruya-AI/cozempic?dir=packaging/nix
+```
+
+AUR (`yay -S cozempic`) and MacPorts (`port install py-cozempic`) submissions are in progress — see [`packaging/README.md`](packaging/README.md) for status and PKGBUILD/Portfile sources.
+
+Then one-time setup:
+
+```bash
 cozempic init
 ```
 
@@ -37,11 +59,7 @@ That's it. The guard daemon auto-starts on every session via hooks. No second te
 
 ### As a Claude Code Plugin
 
-```bash
-pip install cozempic
-```
-
-Then inside Claude Code:
+Install cozempic (any method above), then inside Claude Code:
 
 ```
 /plugin marketplace add Ruya-AI/cozempic
