@@ -4,10 +4,24 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import threading
 from pathlib import Path as _Path
 
 _SAVINGS_FILE = _Path.home() / ".cozempic_savings.json"
+
+
+def _is_codex_response_item(msg: dict, payload_type: str | None = None) -> bool:
+    if msg.get("type") != "response_item":
+        return False
+    if payload_type is None:
+        return True
+    return msg.get("payload", {}).get("type") == payload_type
+
+
+def is_codex_reasoning_item(msg: dict) -> bool:
+    """Return True for Codex reasoning transcript rows."""
+    return _is_codex_response_item(msg, "reasoning")
 
 
 def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0) -> None:
@@ -40,6 +54,9 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
         _SAVINGS_FILE.write_text(json.dumps(data))
     except Exception:
         pass
+
+    if os.environ.get("COZEMPIC_NO_TELEMETRY"):
+        return
 
     # Ping global counters in background. atexit join ensures pings complete
     # before process exit without blocking CLI output.
@@ -107,11 +124,89 @@ def msg_bytes(msg: dict) -> int:
 
 def get_msg_type(msg: dict) -> str:
     """Get the type field from a message."""
+    if msg.get("type") == "response_item":
+        payload = msg.get("payload", {})
+        ptype = payload.get("type")
+        if ptype == "message":
+            return payload.get("role", "message")
+        if ptype in ("function_call", "custom_tool_call", "web_search_call"):
+            return "assistant"
+        if ptype in ("function_call_output", "custom_tool_call_output"):
+            return "user"
+        if ptype == "reasoning":
+            return "assistant"
+    if msg.get("type") == "event_msg":
+        event_type = msg.get("payload", {}).get("type")
+        if event_type == "agent_message":
+            return "progress"
+        if event_type == "token_count":
+            return "token-count"
     return msg.get("type", "unknown")
 
 
 def get_content_blocks(msg: dict) -> list[dict]:
     """Extract content blocks from a message's inner message object."""
+    if msg.get("type") == "response_item":
+        payload = msg.get("payload", {})
+        ptype = payload.get("type")
+
+        if ptype == "message":
+            blocks = []
+            for item in payload.get("content", []):
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type in ("input_text", "output_text"):
+                    blocks.append({"type": "text", "text": item.get("text", "")})
+                elif item_type == "input_image":
+                    blocks.append({"type": "image", **item})
+                else:
+                    blocks.append(dict(item))
+            return blocks
+
+        if ptype in ("function_call", "custom_tool_call", "web_search_call"):
+            if ptype == "web_search_call":
+                action = payload.get("action", {})
+                return [{
+                    "type": "tool_use",
+                    "id": payload.get("call_id", ""),
+                    "name": "WebSearch",
+                    "input": action,
+                }]
+
+            tool_input = payload.get("input", {})
+            if ptype == "function_call":
+                raw_args = payload.get("arguments", "")
+                try:
+                    tool_input = json.loads(raw_args) if raw_args else {}
+                except json.JSONDecodeError:
+                    tool_input = {"raw_arguments": raw_args}
+
+            return [{
+                "type": "tool_use",
+                "id": payload.get("call_id", ""),
+                "name": payload.get("name", ""),
+                "input": tool_input,
+            }]
+
+        if ptype in ("function_call_output", "custom_tool_call_output"):
+            output = payload.get("output", "")
+            return [{
+                "type": "tool_result",
+                "tool_use_id": payload.get("call_id", ""),
+                "content": output,
+            }]
+
+        if ptype == "reasoning":
+            summary = payload.get("summary") or []
+            summary_text = "\n".join(
+                item.get("text", "")
+                for item in summary
+                if isinstance(item, dict)
+            )
+            thinking = payload.get("content") or summary_text or payload.get("encrypted_content", "")
+            return [{"type": "thinking", "thinking": thinking}]
+
     m = msg.get("message", {})
     content = m.get("content", [])
     if isinstance(content, str):
@@ -129,6 +224,26 @@ def content_block_bytes(block: dict) -> int:
 def set_content_blocks(msg: dict, blocks: list[dict]) -> dict:
     """Return a deep copy of msg with content blocks replaced."""
     msg = copy.deepcopy(msg)
+    if msg.get("type") == "response_item":
+        payload = msg.setdefault("payload", {})
+        ptype = payload.get("type")
+
+        if ptype == "message":
+            item_type = "output_text" if payload.get("role") == "assistant" else "input_text"
+            payload["content"] = [
+                {"type": item_type, "text": text_of(block)}
+                for block in blocks
+                if block.get("type") in ("text", "tool_result")
+            ]
+            return msg
+
+        if ptype in ("function_call_output", "custom_tool_call_output"):
+            tool_result = next((b for b in blocks if b.get("type") == "tool_result"), None)
+            if tool_result is not None:
+                content = tool_result.get("content", "")
+                payload["output"] = content if isinstance(content, str) else json.dumps(content)
+            return msg
+
     if "message" in msg:
         msg["message"]["content"] = blocks
     return msg

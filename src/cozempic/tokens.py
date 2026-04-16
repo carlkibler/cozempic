@@ -110,6 +110,34 @@ TokenEstimate = namedtuple(
 )
 
 
+def _extract_codex_context_tokens(messages: list[Message]) -> int | None:
+    """Estimate current Codex context usage from token_count events.
+
+    Codex token_count rows expose cumulative lifetime token usage plus a
+    `used_percent` field that tracks current context occupancy. For long-running
+    sessions, the cumulative totals can exceed the model context window by
+    orders of magnitude, so prefer `used_percent` when available.
+    """
+    context_window = detect_context_window(messages)
+    for _, msg, _ in reversed(messages):
+        if msg.get("type") != "event_msg":
+            continue
+        payload = msg.get("payload", {})
+        if payload.get("type") != "token_count":
+            continue
+
+        used_pct = payload.get("rate_limits", {}).get("primary", {}).get("used_percent")
+        if used_pct is not None:
+            return int(round(context_window * used_pct / 100))
+
+        info = payload.get("info") or {}
+        total_usage = info.get("total_token_usage") or {}
+        total = total_usage.get("total_tokens")
+        if total is not None and total <= int(context_window * 1.2):
+            return total
+    return None
+
+
 def detect_model(messages: list[Message]) -> str | None:
     """Detect the model from the last main-chain assistant message."""
     for _, msg, _ in reversed(messages):
@@ -121,6 +149,15 @@ def detect_model(messages: list[Message]) -> str | None:
         model = inner.get("model", "")
         if model:
             return model
+
+        if msg.get("type") == "response_item" and msg.get("payload", {}).get("type") == "reasoning":
+            continue
+
+    for _, msg, _ in reversed(messages):
+        if msg.get("type") == "turn_context":
+            model = msg.get("payload", {}).get("model")
+            if model:
+                return model
     return None
 
 
@@ -174,6 +211,19 @@ def detect_context_window(messages: list[Message]) -> int:
                 if "[" not in prefix and model.startswith(prefix):
                     return window
 
+    for _, msg, _ in reversed(messages):
+        if msg.get("type") == "event_msg":
+            payload = msg.get("payload", {})
+            if payload.get("type") == "token_count":
+                info = payload.get("info") or {}
+                window = info.get("model_context_window")
+                if window:
+                    return window
+            if payload.get("type") == "task_started":
+                window = payload.get("model_context_window")
+                if window:
+                    return window
+
     return DEFAULT_CONTEXT_WINDOW
 
 
@@ -220,6 +270,27 @@ def extract_usage_tokens(messages: list[Message]) -> dict | None:
     """
     # Walk backwards to find the last main-chain assistant with usage
     for _, msg, _ in reversed(messages):
+        if msg.get("type") == "event_msg":
+            payload = msg.get("payload", {})
+            if payload.get("type") != "token_count":
+                continue
+            info = payload.get("info") or {}
+            total_usage = info.get("total_token_usage") or info.get("last_token_usage") or {}
+            total = total_usage.get("total_tokens")
+            if total is None:
+                continue
+            input_tok = total_usage.get("input_tokens", 0)
+            output_tok = total_usage.get("output_tokens", 0)
+            cache_read = total_usage.get("cached_input_tokens", 0)
+            reasoning_output = total_usage.get("reasoning_output_tokens", 0)
+            return {
+                "input_tokens": input_tok,
+                "output_tokens": output_tok + reasoning_output,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": cache_read,
+                "total": total,
+            }
+
         mtype = get_msg_type(msg)
         if mtype != "assistant":
             continue
@@ -345,6 +416,19 @@ def estimate_session_tokens(
     # Try exact first
     usage = extract_usage_tokens(messages)
     if usage is not None:
+        if model and model.startswith("gpt-"):
+            codex_total = _extract_codex_context_tokens(messages)
+            if codex_total is not None:
+                pct = round(codex_total / context_window * 100, 1)
+                return TokenEstimate(
+                    total=codex_total,
+                    context_pct=pct,
+                    method="heuristic",
+                    confidence="medium",
+                    model=model,
+                    context_window=context_window,
+                )
+
         total = usage["total"]
         pct = round(total / context_window * 100, 1)
         return TokenEstimate(
@@ -410,6 +494,19 @@ def quick_token_estimate(path: Path, context_window: int = DEFAULT_CONTEXT_WINDO
             except json.JSONDecodeError:
                 continue
 
+            if msg.get("type") == "event_msg":
+                payload = msg.get("payload", {})
+                if payload.get("type") == "token_count":
+                    info = payload.get("info") or {}
+                    total_usage = info.get("total_token_usage") or info.get("last_token_usage") or {}
+                    used_pct = payload.get("rate_limits", {}).get("primary", {}).get("used_percent")
+                    window = info.get("model_context_window") or context_window
+                    if used_pct is not None and window:
+                        return int(round(window * used_pct / 100))
+                    total = total_usage.get("total_tokens")
+                    if total is not None and total <= int(window * 1.2):
+                        return total
+
             if get_msg_type(msg) != "assistant":
                 continue
             if msg.get("isSidechain"):
@@ -438,6 +535,10 @@ def calibrate_ratio(messages: list[Message]) -> float | None:
     Requires both exact usage data and content to compare against.
     Returns the ratio, or None if calibration isn't possible.
     """
+    model = detect_model(messages)
+    if model and model.startswith("gpt-"):
+        return None
+
     usage = extract_usage_tokens(messages)
     if usage is None:
         return None

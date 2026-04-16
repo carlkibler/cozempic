@@ -17,7 +17,17 @@ from .init import run_init
 from .recap import save_recap
 from .registry import PRESCRIPTIONS, STRATEGIES
 from .helpers import is_ssh_session, shell_quote
-from .session import find_claude_pid, find_current_session, find_sessions, get_session_cwd, load_messages, project_slug_to_path, resolve_session, save_messages
+from .session import (
+    detect_session_backend,
+    find_claude_pid,
+    find_current_session,
+    find_sessions,
+    get_session_cwd,
+    load_messages,
+    project_slug_to_path,
+    resolve_session,
+    save_messages,
+)
 from .tokens import estimate_session_tokens, quick_token_estimate, calibrate_ratio
 from .types import PrescriptionResult, StrategyResult
 
@@ -143,6 +153,40 @@ def print_prescription_result(pr: PrescriptionResult):
     print()
 
 
+def _post_treatment_messages_for_estimation(path: Path, messages: list[tuple[int, dict, int]]) -> list[tuple[int, dict, int]]:
+    """Remove stale Codex token_count rows before post-prune token estimation."""
+    if detect_session_backend(path) != "codex":
+        return messages
+    return [
+        message for message in messages
+        if not (
+            message[1].get("type") == "event_msg"
+            and message[1].get("payload", {}).get("type") == "token_count"
+        )
+    ]
+
+
+def _estimate_post_treatment_tokens(
+    path: Path,
+    original_total_bytes: int,
+    final_total_bytes: int,
+    pre_te,
+    pre_ratio: float | None,
+    new_messages: list[tuple[int, dict, int]],
+):
+    """Estimate post-prune tokens, with Codex-specific handling."""
+    if detect_session_backend(path) == "codex":
+        ratio = final_total_bytes / original_total_bytes if original_total_bytes else 1.0
+        total = max(0, int(round(pre_te.total * ratio)))
+        pct = round(total / pre_te.context_window * 100, 1) if pre_te.context_window else 0.0
+        return pre_te._replace(total=total, context_pct=pct, method="heuristic", confidence="medium")
+
+    return estimate_session_tokens(
+        _post_treatment_messages_for_estimation(path, new_messages),
+        pre_calibrated_ratio=pre_ratio,
+    )
+
+
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
 def cmd_list(args):
@@ -151,8 +195,8 @@ def cmd_list(args):
         print("No sessions found.")
         return
 
-    print(f"\n  {'Session ID':<40} {'Size':>10} {'Tokens':>8} {'Messages':>8} {'Modified':<20} Project")
-    print(f"  {'─' * 40} {'─' * 10} {'─' * 8} {'─' * 8} {'─' * 20} {'─' * 30}")
+    print(f"\n  {'Session ID':<40} {'Backend':<8} {'Size':>10} {'Tokens':>8} {'Messages':>8} {'Modified':<20} Project")
+    print(f"  {'─' * 40} {'─' * 8} {'─' * 10} {'─' * 8} {'─' * 8} {'─' * 20} {'─' * 30}")
 
     for sess in sorted(sessions, key=lambda s: s["size"], reverse=True):
         sid = sess["session_id"]
@@ -161,7 +205,7 @@ def cmd_list(args):
         tok = quick_token_estimate(sess["path"])
         tok_str = fmt_tokens(tok) if tok is not None else "—"
         print(
-            f"  {sid:<40} {fmt_bytes(sess['size']):>10} {tok_str:>8} {sess['lines']:>8}"
+            f"  {sid:<40} {sess.get('backend', 'claude'):<8} {fmt_bytes(sess['size']):>10} {tok_str:>8} {sess['lines']:>8}"
             f" {sess['mtime'].strftime('%Y-%m-%d %H:%M'):<20} {sess['project'][-40:]}"
         )
     print()
@@ -177,11 +221,12 @@ def cmd_current(args):
     sess = find_current_session(cwd, match_text=match_text)
     if not sess:
         print("Could not detect current session.", file=sys.stderr)
-        print("Make sure you're running from a directory with a Claude Code project.", file=sys.stderr)
+        print("Make sure you're running from a directory with an active Claude Code or Codex project.", file=sys.stderr)
         sys.exit(1)
 
     print(f"\n  Current Session:")
     print(f"    ID:      {sess['session_id']}")
+    print(f"    Backend: {sess.get('backend', 'claude')}")
     print(f"    Size:    {fmt_bytes(sess['size'])} ({sess['lines']} messages)")
 
     from .tokens import detect_context_window, detect_model
@@ -260,7 +305,14 @@ def cmd_treat(args):
 
     # Token estimate after pruning — pass pre-calibrated ratio so metadata-strip
     # doesn't corrupt the post-treatment count by falling back to raw default
-    post_te = estimate_session_tokens(new_messages, pre_calibrated_ratio=pre_ratio)
+    post_te = _estimate_post_treatment_tokens(
+        path,
+        original_bytes,
+        final_bytes,
+        pre_te,
+        pre_ratio,
+        new_messages,
+    )
 
     pr = PrescriptionResult(
         prescription_name=rx_name,
@@ -379,6 +431,9 @@ def cmd_reload(args):
         print("Cannot determine session unambiguously — use an explicit session ID.", file=sys.stderr)
         print("Make sure you're running from a directory with a Claude Code project.", file=sys.stderr)
         sys.exit(1)
+    if sess.get("backend", "claude") != "claude":
+        print("Reload is currently supported only for Claude Code sessions.", file=sys.stderr)
+        sys.exit(1)
 
     # Prefer sidecar cwd (exact path, handles hyphens and special chars).
     # Fall back to slug reversal for sessions predating the sidecar.
@@ -415,7 +470,14 @@ def cmd_reload(args):
     final_count = len(new_messages)
 
     # Token estimate after pruning — pass pre-calibrated ratio
-    post_te = estimate_session_tokens(new_messages, pre_calibrated_ratio=pre_ratio)
+    post_te = _estimate_post_treatment_tokens(
+        path,
+        original_bytes,
+        final_bytes,
+        pre_te,
+        pre_ratio,
+        new_messages,
+    )
 
     pr = PrescriptionResult(
         prescription_name=rx_name,
@@ -551,6 +613,10 @@ def _spawn_watcher(claude_pid: int, project_dir: str, recap_path: Path | None = 
 
 def cmd_checkpoint(args):
     """Save team/agent state from the current session. No pruning."""
+    sess = find_current_session(args.cwd or os.getcwd(), strict=False)
+    if sess and sess.get("backend", "claude") != "claude":
+        print("Checkpoint is currently supported only for Claude Code sessions.", file=sys.stderr)
+        sys.exit(1)
     state = checkpoint_team(cwd=args.cwd or os.getcwd())
     if state and not state.is_empty():
         if args.show:
@@ -567,11 +633,14 @@ def cmd_post_compact(args):
     exists (solo sessions without agent teams).
     """
     from .team import read_team_checkpoint
+    from . import session as session_mod
 
     cwd = args.cwd or os.getcwd()
 
     # Try to find project dir from current session
-    sess = find_current_session(cwd)
+    sess = session_mod.find_current_session(cwd)
+    if sess and sess.get("backend", "claude") != "claude":
+        return
     project_dir = Path(sess["path"]).parent if sess else Path(cwd)
 
     content = read_team_checkpoint(project_dir)
@@ -581,6 +650,10 @@ def cmd_post_compact(args):
 
 def cmd_guard(args):
     """Start the guard daemon to prevent compaction-induced state loss."""
+    sess = find_current_session(args.cwd or os.getcwd(), strict=False)
+    if sess and sess.get("backend", "claude") != "claude":
+        print("Guard mode is currently supported only for Claude Code sessions.", file=sys.stderr)
+        sys.exit(1)
     session_id = args.session or None
 
     if getattr(args, "system_overhead_tokens", None):
@@ -689,14 +762,21 @@ def cmd_init(args):
         print(f"  Hooks added to {hooks['settings_path']}:")
         for h in hooks["added"]:
             print(f"    + {h}")
-        if hooks["backup_path"]:
-            print(f"  Backup: {hooks['backup_path']}")
+    elif hooks["updated"]:
+        print(f"  Hooks updated in {hooks['settings_path']}:")
     else:
         print(f"  Hooks: already configured (nothing to add)")
+
+    if hooks["updated"]:
+        for h in hooks["updated"]:
+            print(f"    ↑ {h} (upgraded)")
 
     if hooks["skipped"]:
         for h in hooks["skipped"]:
             print(f"    ~ {h} (already exists, skipped)")
+
+    if hooks["backup_path"]:
+        print(f"  Backup: {hooks['backup_path']}")
 
     print()
 
@@ -916,7 +996,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 1.6.19")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.7.0")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")

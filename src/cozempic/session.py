@@ -1,4 +1,4 @@
-"""Session discovery and I/O for Claude Code JSONL files."""
+"""Session discovery and I/O for Claude Code and Codex JSONL files."""
 
 from __future__ import annotations
 
@@ -159,6 +159,16 @@ def get_projects_dir() -> Path:
     return get_claude_dir() / "projects"
 
 
+def get_codex_dir() -> Path:
+    """Return the Codex config directory."""
+    return Path.home() / ".codex"
+
+
+def get_codex_sessions_dir() -> Path:
+    """Return the Codex sessions directory."""
+    return get_codex_dir() / "sessions"
+
+
 def find_project_dirs(project_filter: str | None = None) -> list[Path]:
     """Find project directories, optionally filtered by name."""
     projects = get_projects_dir()
@@ -171,7 +181,7 @@ def find_project_dirs(project_filter: str | None = None) -> list[Path]:
 
 
 def find_sessions(project_filter: str | None = None) -> list[dict]:
-    """Find all JSONL session files with metadata."""
+    """Find all JSONL session files with metadata across supported backends."""
     sessions = []
     for proj_dir in find_project_dirs(project_filter):
         for f in sorted(proj_dir.glob("*.jsonl")):
@@ -191,8 +201,86 @@ def find_sessions(project_filter: str | None = None) -> list[dict]:
                 "size": size,
                 "mtime": mtime,
                 "lines": line_count,
+                "backend": "claude",
             })
+    sessions.extend(find_codex_sessions(project_filter))
     return sessions
+
+
+def _read_codex_session_meta(path: Path) -> dict | None:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            first = fh.readline().strip()
+        if not first:
+            return None
+        obj = json.loads(first)
+        if obj.get("type") != "session_meta":
+            return None
+        return obj.get("payload", {})
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def find_codex_sessions(project_filter: str | None = None) -> list[dict]:
+    """Find Codex sessions under ~/.codex/sessions."""
+    sessions_dir = get_codex_sessions_dir()
+    if not sessions_dir.exists():
+        return []
+
+    sessions = []
+    for f in sorted(sessions_dir.rglob("*.jsonl")):
+        if ".jsonl.bak" in f.name or f.name.endswith(".bak"):
+            continue
+        meta = _read_codex_session_meta(f) or {}
+        cwd = meta.get("cwd", "")
+        if project_filter and project_filter.lower() not in cwd.lower() and project_filter.lower() not in f.name.lower():
+            continue
+
+        size = f.stat().st_size
+        mtime = datetime.fromtimestamp(f.stat().st_mtime)
+        line_count = 0
+        with open(f, "r", encoding="utf-8") as fh:
+            for _ in fh:
+                line_count += 1
+
+        sessions.append({
+            "path": f,
+            "project": cwd or f.parent.as_posix(),
+            "session_id": meta.get("id", f.stem),
+            "size": size,
+            "mtime": mtime,
+            "lines": line_count,
+            "backend": "codex",
+            "cwd": cwd or None,
+            "file_id": f.stem,
+        })
+    return sessions
+
+
+def _paths_overlap(base: str | None, other: str | None) -> bool:
+    if not base or not other:
+        return False
+    try:
+        base_path = Path(base).resolve()
+        other_path = Path(other).resolve()
+        return (
+            base_path == other_path
+            or base_path in other_path.parents
+            or other_path in base_path.parents
+        )
+    except OSError:
+        return False
+
+
+def _find_current_codex_session(sessions: list[dict], cwd: str | None) -> dict | None:
+    target = cwd or os.getcwd()
+    matches = [
+        sess for sess in sessions
+        if sess.get("backend") == "codex" and _paths_overlap(sess.get("cwd"), target)
+    ]
+    if matches:
+        return max(matches, key=lambda s: s["mtime"])
+    return None
 
 
 def cwd_to_project_slug(cwd: str | None = None) -> str:
@@ -331,17 +419,30 @@ def find_current_session(
         if matched:
             return matched
 
-    # Strategy 3: CWD slug match
+    # Strategy 3: Codex cwd match
+    codex_match = _find_current_codex_session(sessions, cwd)
+    if codex_match:
+        return codex_match
+
+    # Strategy 4: Claude CWD slug match
     slug = cwd_to_project_slug(cwd)
-    matching = [s for s in sessions if slug in s["project"]]
+    matching = [s for s in sessions if s.get("backend") == "claude" and slug in s["project"]]
     if matching:
         return max(matching, key=lambda s: s["mtime"])
 
-    # Strategy 4: Fallback to most recently modified
+    # Strategy 5: Fallback to most recently modified.
     # Disabled in strict mode — refuse to guess on destructive paths.
     if strict:
         return None
     return max(sessions, key=lambda s: s["mtime"])
+
+
+def detect_session_backend(path: Path) -> str:
+    """Return the backend name for a session path."""
+    parts = path.resolve().parts
+    if ".codex" in parts:
+        return "codex"
+    return "claude"
 
 
 def resolve_session(
@@ -372,6 +473,10 @@ def resolve_session(
         if sess["session_id"] == session_arg:
             return sess["path"]
         if sess["session_id"].startswith(session_arg):
+            return sess["path"]
+        if sess.get("file_id") == session_arg or str(sess["path"]).endswith(session_arg):
+            return sess["path"]
+        if sess.get("file_id", "").startswith(session_arg):
             return sess["path"]
 
     print(f"Error: Cannot find session '{session_arg}'", file=sys.stderr)
@@ -457,7 +562,13 @@ def get_session_cwd(session_id: str) -> str | None:
     if not session_id:
         return None
     rec = _load_sidecar().get(session_id)
-    return rec.get("cwd") if rec else None
+    if rec:
+        return rec.get("cwd")
+
+    for sess in find_codex_sessions():
+        if sess["session_id"] == session_id:
+            return sess.get("cwd")
+    return None
 
 
 def get_session_context_window(session_id: str) -> int | None:
@@ -465,7 +576,26 @@ def get_session_context_window(session_id: str) -> int | None:
     if not session_id:
         return None
     rec = _load_sidecar().get(session_id)
-    return rec.get("context_window") if rec else None
+    if rec:
+        return rec.get("context_window")
+
+    for sess in find_codex_sessions():
+        if sess["session_id"] != session_id:
+            continue
+        messages = load_messages(sess["path"])
+        for _, msg, _ in reversed(messages):
+            if msg.get("type") == "event_msg":
+                payload = msg.get("payload", {})
+                if payload.get("type") == "token_count":
+                    info = payload.get("info") or {}
+                    window = info.get("model_context_window")
+                    if window:
+                        return window
+                if payload.get("type") == "task_started":
+                    window = payload.get("model_context_window")
+                    if window:
+                        return window
+    return None
 
 
 # ─── JSONL I/O ────────────────────────────────────────────────────────────────

@@ -6,7 +6,15 @@ import hashlib
 import json
 import re
 
-from ..helpers import get_content_blocks, get_msg_type, is_protected, msg_bytes, set_content_blocks, text_of
+from ..helpers import (
+    get_content_blocks,
+    get_msg_type,
+    is_codex_reasoning_item,
+    is_protected,
+    msg_bytes,
+    set_content_blocks,
+    text_of,
+)
 from ..registry import strategy
 from ..types import Message, PruneAction, StrategyResult
 
@@ -30,6 +38,20 @@ def strategy_thinking_blocks(messages: list[Message], config: dict) -> StrategyR
         if is_protected(msg):
             continue
         if get_msg_type(msg) != "assistant":
+            continue
+
+        if is_codex_reasoning_item(msg):
+            if mode == "signature-only":
+                continue
+            actions.append(PruneAction(
+                line_index=idx,
+                action="remove",
+                reason=f"thinking-blocks ({mode})",
+                original_bytes=size,
+                pruned_bytes=0,
+            ))
+            total_pruned += size
+            replaced += 1
             continue
 
         blocks = get_content_blocks(msg)
@@ -493,6 +515,8 @@ def _build_stub(block: dict, all_blocks: list[dict], messages: list[Message], po
             if b.get("type") == "tool_use" and b.get("id") == tool_use_id:
                 tool_name = b.get("name", "")
                 tool_input = b.get("input", {})
+                if not isinstance(tool_input, dict):
+                    tool_input = {"command": str(tool_input)}
                 tool_path = (
                     tool_input.get("file_path", "")
                     or tool_input.get("path", "")

@@ -9,6 +9,7 @@ This module automates both so `cozempic init` is the only setup step.
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import sys
@@ -130,6 +131,73 @@ def _is_cozempic_hook(hook_entry: dict) -> bool:
     return False
 
 
+def _is_cozempic_command_hook(hook: dict) -> bool:
+    """Return True when a single hook command belongs to Cozempic."""
+    return "cozempic" in hook.get("command", "")
+
+
+def _matcher_label(entry: dict) -> str:
+    """Human-readable label for hook matcher output."""
+    return entry.get("matcher") or "(all)"
+
+
+def _merge_hook_entry(existing_entry: dict, new_entry: dict) -> dict:
+    """Replace only Cozempic hooks, preserving any unrelated hooks."""
+    merged = copy.deepcopy(existing_entry)
+    merged["matcher"] = new_entry.get("matcher", "")
+    merged["hooks"] = [
+        copy.deepcopy(h)
+        for h in existing_entry.get("hooks", [])
+        if not _is_cozempic_command_hook(h)
+    ] + copy.deepcopy(new_entry.get("hooks", []))
+    return merged
+
+
+def _upsert_hook_entry(existing_entries: list[dict], new_entry: dict) -> tuple[list[dict], str]:
+    """Add or upgrade one Cozempic hook entry for a matcher.
+
+    Returns (updated_entries, status) where status is one of:
+      - "added"
+      - "updated"
+      - "skipped"
+    """
+    matcher = new_entry.get("matcher", "")
+    matching_indexes = [
+        i
+        for i, entry in enumerate(existing_entries)
+        if entry.get("matcher", "") == matcher and _is_cozempic_hook(entry)
+    ]
+
+    if not matching_indexes:
+        return existing_entries + [copy.deepcopy(new_entry)], "added"
+
+    first_index = matching_indexes[0]
+    merged_entry = _merge_hook_entry(existing_entries[first_index], new_entry)
+    updated_entries = []
+
+    for i, entry in enumerate(existing_entries):
+        if i == first_index:
+            updated_entries.append(merged_entry)
+            continue
+
+        if i in matching_indexes[1:]:
+            cleaned_entry = copy.deepcopy(entry)
+            cleaned_entry["hooks"] = [
+                copy.deepcopy(h)
+                for h in entry.get("hooks", [])
+                if not _is_cozempic_command_hook(h)
+            ]
+            if cleaned_entry["hooks"]:
+                updated_entries.append(cleaned_entry)
+            continue
+
+        updated_entries.append(entry)
+
+    if merged_entry != existing_entries[first_index] or len(matching_indexes) > 1:
+        return updated_entries, "updated"
+    return updated_entries, "skipped"
+
+
 def _settings_path(project_dir: str) -> Path:
     """Return the .claude/settings.json path for a project."""
     return Path(project_dir) / ".claude" / "settings.json"
@@ -164,10 +232,9 @@ def _save_settings(path: Path, settings: dict) -> None:
 def wire_hooks(project_dir: str) -> dict:
     """Add cozempic checkpoint hooks to .claude/settings.json.
 
-    Idempotent — skips hooks that already exist.
+    Idempotent — skips hooks that already match and upgrades stale Cozempic hooks.
 
-    Returns dict with: added (list of hook events added), skipped (list already present),
-    settings_path, backup_path.
+    Returns dict with: added, updated, skipped, settings_path, backup_path.
     """
     path = _settings_path(project_dir)
     settings = _load_settings(path)
@@ -175,39 +242,33 @@ def wire_hooks(project_dir: str) -> dict:
     hooks = settings.setdefault("hooks", {})
 
     added = []
+    updated = []
     skipped = []
 
     for event_name, hook_entries in COZEMPIC_HOOKS.items():
         existing = hooks.get(event_name, [])
 
-        # Check which hook entries are already installed
         for new_entry in hook_entries:
-            already_exists = False
-            for existing_entry in existing:
-                if _is_cozempic_hook(existing_entry):
-                    # Check if same matcher
-                    if existing_entry.get("matcher", "") == new_entry.get("matcher", ""):
-                        already_exists = True
-                        break
+            existing, status = _upsert_hook_entry(existing, new_entry)
+            matcher = _matcher_label(new_entry)
 
-            if already_exists:
-                matcher = new_entry.get("matcher", "(all)")
-                skipped.append(f"{event_name}[{matcher}]")
-            else:
-                existing.append(new_entry)
-                matcher = new_entry.get("matcher", "(all)")
+            if status == "added":
                 added.append(f"{event_name}[{matcher}]")
+            elif status == "updated":
+                updated.append(f"{event_name}[{matcher}]")
+            else:
+                skipped.append(f"{event_name}[{matcher}]")
 
         hooks[event_name] = existing
 
-    # Only write if we added something
     backup = None
-    if added:
+    if added or updated:
         backup = _backup_settings(path)
         _save_settings(path, settings)
 
     return {
         "added": added,
+        "updated": updated,
         "skipped": skipped,
         "settings_path": str(path),
         "backup_path": str(backup) if backup else None,

@@ -145,6 +145,8 @@ def ping_install_if_new() -> None:
             # Sentinel exists with different version = upgrade (not first install)
             is_upgrade = bool(old_version)
         _INSTALL_SENTINEL.write_text(__version__)
+        if os.environ.get("COZEMPIC_NO_TELEMETRY"):
+            return
         urlopen(Request(_INSTALL_COUNTER_URL, headers={"User-Agent": f"cozempic/{__version__}"}), timeout=3)
         if is_upgrade:
             urlopen(Request(_COUNTER_URL, headers={"User-Agent": f"cozempic/{__version__}"}), timeout=3)
@@ -181,10 +183,11 @@ def maybe_auto_update(force: bool = False, silent: bool = False) -> None:
     if not silent:
         print(f"  Cozempic: updating {__version__} → {latest}...", flush=True)
     if _do_upgrade(latest):
-        try:
-            urlopen(Request(_COUNTER_URL, headers={"User-Agent": f"cozempic/{latest}"}), timeout=3)
-        except Exception:
-            pass
+        if not os.environ.get("COZEMPIC_NO_TELEMETRY"):
+            try:
+                urlopen(Request(_COUNTER_URL, headers={"User-Agent": f"cozempic/{latest}"}), timeout=3)
+            except Exception:
+                pass
         if not silent:
             print(f"  Cozempic: updated to v{latest}.", flush=True)
     else:
