@@ -750,7 +750,9 @@ def cmd_init(args):
     # Report hooks
     hooks = result["hooks"]
     updated = hooks.get("updated") or []
-    if hooks["added"] or updated:
+    if hooks.get("error"):
+        print(f"  Hooks: ERROR — {hooks['error']}")
+    elif hooks["added"] or updated:
         print(f"  Hooks wired in {hooks['settings_path']}:")
         for h in hooks["added"]:
             print(f"    + {h} (added)")
@@ -1287,7 +1289,8 @@ def _maybe_global_init(argv: list[str]) -> None:
                 file=sys.stderr,
             )
             print(
-                "  Wires hooks into ~/.claude/settings.json (one-time, reversible).",
+                "  Wires hooks into ~/.claude/settings.json. Reverse any time with "
+                "`cozempic init --uninstall-global`.",
                 file=sys.stderr,
             )
             response = _prompt_with_timeout("  Enable? [Y/n] ", timeout=30, default="n")
@@ -1326,6 +1329,17 @@ def _maybe_global_init(argv: list[str]) -> None:
     hooks_result = result.get("hooks", {})
     added = hooks_result.get("added", []) or []
     updated = hooks_result.get("updated", []) or []
+    load_error = hooks_result.get("error")
+
+    if load_error:
+        # Don't claim we "enabled" anything we didn't actually install. Do NOT
+        # touch the marker — let the user retry after `cozempic self-update`.
+        print(
+            f"  Cozempic: global init FAILED — {load_error}",
+            file=sys.stderr,
+        )
+        return
+
     try:
         _GLOBAL_INIT_MARKER.touch()
     except OSError:
@@ -1365,10 +1379,10 @@ def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
     SCHEMA VERSION across ALL settings files that contain any cozempic hooks.
 
     If one file has current-schema hooks and another has stale cozempic hooks,
-    we return False so auto-init runs wire_hooks and refreshes the stale one.
+    return False so auto-init runs wire_hooks and refreshes the stale one.
     """
     import json as _json
-    from .init import has_current_schema, _is_cozempic_command
+    from .init import _is_cozempic_command, HOOK_SCHEMA_MARKER
 
     any_cozempic_found = False
     for name in ("settings.json", "settings.local.json"):
@@ -1384,8 +1398,6 @@ def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
         if not isinstance(hooks, dict):
             continue
 
-        file_has_any_cozempic = False
-        file_has_stale_cozempic = False
         for entries in hooks.values():
             if not isinstance(entries, list):
                 continue
@@ -1396,21 +1408,13 @@ def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
                     if not isinstance(h, dict):
                         continue
                     cmd = str(h.get("command", ""))
-                    if _is_cozempic_command(cmd):
-                        file_has_any_cozempic = True
-                        any_cozempic_found = True
-                        if "cozempic-hook-schema=" not in cmd or not has_current_schema({"hooks": {"x": [entry]}}):
-                            # Either no schema marker, or an old schema version
-                            if "cozempic-hook-schema=" in cmd:
-                                # Parse out the version from the marker to compare
-                                from .init import HOOK_SCHEMA_MARKER
-                                if HOOK_SCHEMA_MARKER not in cmd:
-                                    file_has_stale_cozempic = True
-                            else:
-                                file_has_stale_cozempic = True
-
-        if file_has_any_cozempic and file_has_stale_cozempic:
-            return False  # Stale hooks in some file → refresh needed
+                    if not _is_cozempic_command(cmd):
+                        continue
+                    any_cozempic_found = True
+                    # Any non-current cozempic hook (missing or stale marker)
+                    # means a refresh is due.
+                    if HOOK_SCHEMA_MARKER not in cmd:
+                        return False
 
     return any_cozempic_found
 
@@ -1451,6 +1455,14 @@ def _maybe_auto_init(argv: list[str]) -> None:
         return
 
     hooks_result = result.get("hooks", {})
+    load_error = hooks_result.get("error")
+    if load_error:
+        print(
+            f"  Cozempic: auto-init FAILED — {load_error}",
+            file=sys.stderr,
+        )
+        return
+
     added = hooks_result.get("added", []) or []
     updated = hooks_result.get("updated", []) or []
     if added or updated:

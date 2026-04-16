@@ -1106,11 +1106,9 @@ def _is_cozempic_guard_process(pid: int) -> bool:
         #   /path/to/cozempic guard ...
         if "cozempic.cli" in args and "guard" in args:
             return True
-        if "cozempic" in args.split()[0] if args.split() else False:
-            # First token is cozempic binary path
-            tokens = args.split()
-            if len(tokens) > 1 and tokens[1] == "guard":
-                return True
+        tokens = args.split()
+        if len(tokens) >= 2 and "cozempic" in tokens[0] and tokens[1] == "guard":
+            return True
         return False
     except (subprocess.SubprocessError, OSError):
         # If we can't verify, err on the side of NOT signaling a potentially

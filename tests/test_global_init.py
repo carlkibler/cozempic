@@ -225,8 +225,11 @@ class TestUninstallHooks(unittest.TestCase):
 
 class TestStaleHookRefresh(unittest.TestCase):
     def test_stale_cozempic_hook_gets_refreshed(self):
-        """A settings.json with a pre-schema cozempic hook (old command string,
-        no schema marker) must be upgraded to the current schema on wire_hooks."""
+        """A settings.json with a pre-schema cozempic hook (old wrapper command,
+        no schema marker) must be upgraded to the current schema on wire_hooks.
+        Uses the realistic pre-v2 command pattern which had `python3 -m cozempic`
+        as the fallback wrapper — that's how we detect 'ours' pre-schema.
+        """
         from cozempic.init import wire_hooks, HOOK_SCHEMA_MARKER
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / ".claude").mkdir()
@@ -236,8 +239,9 @@ class TestStaleHookRefresh(unittest.TestCase):
                     "SessionStart": [{
                         "matcher": "",
                         "hooks": [
-                            # Stale cozempic hook — has "cozempic" but no schema marker
-                            {"type": "command", "command": "cozempic guard --daemon"},
+                            # Stale cozempic hook — the pre-v2 canonical pattern
+                            # (python3 -m cozempic fallback, no schema marker).
+                            {"type": "command", "command": "{ cozempic guard --daemon 2>/dev/null || python3 -m cozempic guard --daemon 2>/dev/null; } || true"},
                         ],
                     }],
                 }
@@ -248,6 +252,59 @@ class TestStaleHookRefresh(unittest.TestCase):
             after = json.loads(settings_path.read_text())
             cmd = after["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             self.assertIn(HOOK_SCHEMA_MARKER, cmd, "schema marker must be present after refresh")
+
+    def test_user_command_with_cozempic_substring_is_not_treated_as_ours(self):
+        """A user-authored chain command like `cozempic checkpoint && backup.sh`
+        must NOT be classified as cozempic-installed (bug 1.4). Previously the
+        substring-match fallback would false-match and `uninstall_hooks` would
+        delete the user's backup script."""
+        from cozempic.init import _is_cozempic_command
+        # Chain with cozempic + user step — should NOT match (no python fallback)
+        self.assertFalse(_is_cozempic_command("cozempic checkpoint && my-backup.sh"))
+        # User hook referencing cozempic in a string — should NOT match
+        self.assertFalse(_is_cozempic_command('echo "cozempic notes" > /tmp/out'))
+        # A real canonical hook with the python fallback wrapper — SHOULD match
+        self.assertTrue(_is_cozempic_command(
+            "{ cozempic checkpoint 2>/dev/null || python3 -m cozempic checkpoint 2>/dev/null; } || true"
+        ))
+        # A v3+ hook with the schema marker — SHOULD match
+        self.assertTrue(_is_cozempic_command(
+            "echo 'hi' # cozempic-hook-schema=v3"
+        ))
+
+    def test_refresh_preserves_user_command_in_mixed_entry(self):
+        """Regression for bug 1.3 + 1.4: wire_hooks refresh must preserve
+        user-authored commands in a mixed entry AND keep them at their
+        original position in the hooks list."""
+        from cozempic.init import wire_hooks
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".claude").mkdir()
+            settings_path = Path(tmp) / ".claude" / "settings.json"
+            settings_path.write_text(json.dumps({
+                "hooks": {
+                    "SessionStart": [{
+                        "matcher": "",
+                        "hooks": [
+                            # User hook FIRST (order matters for some setups)
+                            {"type": "command", "command": "export MY_SETUP=1"},
+                            # Stale cozempic hook
+                            {"type": "command", "command": "{ cozempic guard --daemon 2>/dev/null || python3 -m cozempic guard --daemon 2>/dev/null; } || true"},
+                            # Another user hook AFTER
+                            {"type": "command", "command": "echo 'session started' >> /tmp/user.log"},
+                        ],
+                    }],
+                }
+            }))
+            wire_hooks(tmp)
+            after = json.loads(settings_path.read_text())
+            cmds = [h["command"] for h in after["hooks"]["SessionStart"][0]["hooks"]]
+            # User commands both present
+            self.assertIn("export MY_SETUP=1", cmds)
+            self.assertIn("echo 'session started' >> /tmp/user.log", cmds)
+            # First cmd is the first user cmd (order preserved)
+            self.assertEqual(cmds[0], "export MY_SETUP=1")
+            # Last cmd is the second user cmd (still at end)
+            self.assertEqual(cmds[-1], "echo 'session started' >> /tmp/user.log")
 
     def test_current_schema_hook_is_skipped(self):
         """wire_hooks on an already-current settings.json must not touch it."""

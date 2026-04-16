@@ -43,28 +43,30 @@ HOOK_SCHEMA_VERSION = "v3"
 HOOK_SCHEMA_MARKER = f"cozempic-hook-schema={HOOK_SCHEMA_VERSION}"
 
 
+_LOAD_ERROR: str | None = None  # populated if _load_canonical_hooks failed
+
+
 def _load_canonical_hooks() -> dict:
     """Load the canonical hook definitions bundled with the package.
 
     Returns an empty dict on any failure (missing file, corrupt JSON, old
-    wheel without the packaged data). This keeps cozempic importable even
-    with a broken install so the user can run `cozempic self-update` to
-    recover.
+    wheel without the packaged data). Records the error in `_LOAD_ERROR` so
+    wire_hooks / uninstall_hooks can surface it to the user on the first
+    operation (NOT at import time — otherwise every cozempic invocation
+    spams stderr on a broken install).
     """
+    global _LOAD_ERROR
     try:
         try:
             from importlib.resources import files
             data = files("cozempic").joinpath("data/hooks.json").read_text(encoding="utf-8")
         except Exception:
-            # Fallback for older Python or unusual install layouts
             data = (Path(__file__).parent / "data" / "hooks.json").read_text(encoding="utf-8")
         return json.loads(data).get("hooks", {})
     except Exception as exc:
-        # Don't crash import — degrade gracefully. Surface the error on the
-        # first init attempt (wire_hooks raises with a friendlier message).
-        sys.stderr.write(
-            f"  Cozempic: could not load bundled hook definitions ({exc}). "
-            "Run `cozempic self-update` to repair the install.\n"
+        _LOAD_ERROR = (
+            f"could not load bundled hook definitions ({exc}). "
+            "Run `cozempic self-update` to repair the install."
         )
         return {}
 
@@ -87,14 +89,23 @@ def _is_cozempic_hook(hook_entry: dict) -> bool:
 
 def _is_cozempic_command(command: str) -> bool:
     """Return True if this single hook command was installed by cozempic.
-    Signature: the shell comment `cozempic-hook-schema=<ver>` at the end of
-    the command string. Falls back to substring "cozempic" for pre-schema
-    installations so they're still recognized as ours (and thus eligible
-    for refresh / uninstall)."""
+
+    Detection order:
+      1. `cozempic-hook-schema=<ver>` marker (v2+ installs)
+      2. `python3 -m cozempic` fallback wrapper (present in every hook we've
+         ever installed — canonical pattern is `cozempic X || python3 -m cozempic X`).
+
+    Explicitly does NOT match on bare "cozempic" substring: that false-matches
+    user-authored chain commands like `cozempic checkpoint && my-backup.sh`,
+    silently eating the user's backup script during uninstall/refresh. The
+    `python3 -m cozempic` fallback-wrapper pattern is distinctive enough that
+    user authored commands don't typically contain it.
+    """
     if "cozempic-hook-schema=" in command:
         return True
-    # Pre-v2 hooks had no schema marker — substring match
-    return "cozempic" in command
+    if "python3 -m cozempic" in command or "python -m cozempic" in command:
+        return True
+    return False
 
 
 def _is_current_cozempic_command(command: str) -> bool:
@@ -228,7 +239,7 @@ def wire_hooks(project_dir: str) -> dict:
         return {
             "added": [], "updated": [], "skipped": [],
             "settings_path": str(path), "backup_path": None,
-            "error": "bundled hook definitions unavailable — run `cozempic self-update`",
+            "error": _LOAD_ERROR or "bundled hook definitions unavailable — run `cozempic self-update`",
         }
 
     with _SettingsLock(path):
@@ -268,10 +279,27 @@ def wire_hooks(project_dir: str) -> dict:
                     skipped.append(f"{event_name}[{display}]")
                     continue
 
-                # STALE — refresh. Replace only cozempic commands, keep user ones.
+                # STALE — refresh. Replace cozempic commands IN PLACE (preserve
+                # original position of user-authored commands in the list).
                 old_hooks = our_entry.get("hooks", []) or []
-                user_hooks = [h for h in old_hooks if not _is_cozempic_command(h.get("command", ""))]
-                new_hooks = list(new_entry.get("hooks", [])) + user_hooks
+                canonical_new = list(new_entry.get("hooks", []))
+                new_hooks: list = []
+                canonical_inserted = False
+                for h in old_hooks:
+                    if _is_cozempic_command(h.get("command", "")):
+                        # Splice in the new canonical commands at the position
+                        # of the FIRST stale cozempic command; drop the rest.
+                        if not canonical_inserted:
+                            new_hooks.extend(canonical_new)
+                            canonical_inserted = True
+                        # else: this stale cozempic command is skipped
+                    else:
+                        new_hooks.append(h)
+                if not canonical_inserted:
+                    # Defensive: shouldn't happen (we only entered refresh path
+                    # because a stale cozempic command exists), but fall back
+                    # to appending.
+                    new_hooks.extend(canonical_new)
                 our_entry["hooks"] = new_hooks
                 updated.append(f"{event_name}[{display}]")
 

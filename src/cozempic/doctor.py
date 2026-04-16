@@ -771,6 +771,40 @@ def check_agent_model_mismatch() -> CheckResult:
     )
 
 
+def check_cozempic_daemon_running() -> CheckResult:
+    """Report whether a cozempic guard daemon is running for the current session.
+
+    Looks for an alive PID in /tmp/cozempic_guard_*.pid — if none is live,
+    background protection isn't active for this session even if the hooks
+    are wired.
+    """
+    from pathlib import Path as _Path
+    import os as _os, glob as _glob
+    pids_alive: list[int] = []
+    for pidf in _glob.glob("/tmp/cozempic_guard_*.pid"):
+        try:
+            pid = int(_Path(pidf).read_text().strip())
+            _os.kill(pid, 0)
+            pids_alive.append(pid)
+        except (OSError, ValueError):
+            continue
+    if pids_alive:
+        return CheckResult(
+            name="cozempic-daemon-running",
+            status="ok",
+            message=f"{len(pids_alive)} guard daemon(s) running (PIDs: {', '.join(str(p) for p in pids_alive[:5])})",
+        )
+    return CheckResult(
+        name="cozempic-daemon-running",
+        status="warning",
+        message="No guard daemon is running. Background protection is inactive for this session.",
+        fix_description=(
+            "The daemon starts automatically on next Claude Code session via the "
+            "SessionStart hook. Start one now: `cozempic guard --daemon`."
+        ),
+    )
+
+
 def check_cozempic_project_init() -> CheckResult:
     """Check that the current working directory's .claude/ has cozempic hooks wired.
 
@@ -1000,6 +1034,7 @@ ALL_CHECKS: list[tuple[str, callable, callable | None]] = [
     ("hooks-trust-flag", check_hooks_trust_flag, fix_hooks_trust_flag),
     ("cozempic-hooks", check_cozempic_hooks, None),
     ("cozempic-project-init", check_cozempic_project_init, None),
+    ("cozempic-daemon-running", check_cozempic_daemon_running, None),
     ("claude-json-corruption", check_claude_json_corruption, fix_claude_json_corruption),
     ("corrupted-tool-use", check_corrupted_tool_use, fix_corrupted_tool_use),
     ("orphaned-tool-results", check_orphaned_tool_results, fix_orphaned_tool_results),
