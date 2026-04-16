@@ -1200,8 +1200,19 @@ def _maybe_global_init(argv: list[str]) -> None:
     if _GLOBAL_INIT_MARKER.exists():
         return
 
+    # --help / -h are pure-info, never trigger init
+    if "--help" in argv or "-h" in argv:
+        return
+
     cmd = next((tok for tok in argv if tok in _SUBCOMMANDS), None)
-    if cmd is None or cmd in _AUTO_INIT_SKIP_CMDS:
+    is_version_check = "--version" in argv
+
+    # Trigger conditions:
+    #   - any subcommand not in the skip list, OR
+    #   - bare `cozempic --version` (the canonical post-install verification check)
+    if cmd in _AUTO_INIT_SKIP_CMDS:
+        return
+    if cmd is None and not is_version_check:
         return
 
     home_claude = Path.home() / ".claude"
@@ -1216,11 +1227,45 @@ def _maybe_global_init(argv: list[str]) -> None:
             pass
         return
 
+    # Ask the user interactively when both stdin and stderr are TTYs (real terminal).
+    # Fall back to silent auto-install for non-interactive contexts (CI, pipelines,
+    # Claude Code subprocess invocations) so we never hang waiting for input.
+    interactive = sys.stdin.isatty() and sys.stderr.isatty()
+
+    if interactive:
+        try:
+            print(
+                "\n  Cozempic — enable background protection for every Claude Code session?",
+                file=sys.stderr,
+            )
+            print(
+                "  Wires hooks into ~/.claude/settings.json (one-time, reversible).",
+                file=sys.stderr,
+            )
+            try:
+                response = input("  Enable? [Y/n] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("", file=sys.stderr)
+                response = "n"
+        except OSError:
+            response = ""  # treat fd errors as "go ahead silently"
+
+        if response in ("n", "no"):
+            try:
+                _GLOBAL_INIT_MARKER.touch()
+            except OSError:
+                pass
+            print(
+                "  Skipped. Run `cozempic init --global` later if you change your mind.\n",
+                file=sys.stderr,
+            )
+            return
+
     try:
         result = run_init(str(Path.home()), skip_slash=True)
     except Exception as exc:
         print(
-            f"  Cozempic: global auto-init skipped ({exc}). Run `cozempic init --global` manually.",
+            f"  Cozempic: global init skipped ({exc}). Run `cozempic init --global` manually.",
             file=sys.stderr,
         )
         return
@@ -1231,9 +1276,23 @@ def _maybe_global_init(argv: list[str]) -> None:
     except OSError:
         pass
 
-    if added:
+    if not added:
+        return
+
+    if interactive:
         print(
-            "  Cozempic: now protecting every Claude Code session globally "
+            f"  Cozempic enabled — {len(added)} hook(s) wired into ~/.claude/settings.json.",
+            file=sys.stderr,
+        )
+        print(
+            "  Disable any time with `cozempic init --uninstall-global` "
+            "or COZEMPIC_NO_GLOBAL_INIT=1.\n",
+            file=sys.stderr,
+        )
+    else:
+        # Non-interactive: terse one-line notice
+        print(
+            f"  Cozempic: protecting every Claude Code session globally "
             f"({len(added)} hook(s) wired into ~/.claude/settings.json). "
             "Disable with `cozempic init --uninstall-global` or COZEMPIC_NO_GLOBAL_INIT=1.",
             file=sys.stderr,

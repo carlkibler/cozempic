@@ -55,7 +55,8 @@ class TestGlobalAutoInit(unittest.TestCase):
                         ri.assert_not_called()
                         self.assertFalse(marker.exists())
 
-    def test_runs_when_unconfigured(self):
+    def test_runs_when_unconfigured_non_interactive(self):
+        """Non-TTY (CI / Claude subprocess): silent auto-install."""
         from cozempic import cli
         with tempfile.TemporaryDirectory() as tmp:
             self._stub_home_claude(tmp)
@@ -63,15 +64,90 @@ class TestGlobalAutoInit(unittest.TestCase):
             marker = self._stub_marker(tmp)
             with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
                 with mock.patch.object(cli.Path, "home", return_value=Path(tmp)):
-                    cli._maybe_global_init(["list"])
-                    # Hooks were written
+                    # Force non-interactive mode (default for tests anyway)
+                    with mock.patch.object(cli.sys.stdin, "isatty", return_value=False):
+                        cli._maybe_global_init(["list"])
                     settings = Path(tmp) / ".claude" / "settings.json"
                     self.assertTrue(settings.exists())
                     data = json.loads(settings.read_text())
                     self.assertIn("hooks", data)
                     self.assertIn("SessionStart", data["hooks"])
-                    # Marker was set so we don't re-run
                     self.assertTrue(marker.exists())
+
+    def test_interactive_yes_installs(self):
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            self._stub_home_claude(tmp)
+            os.environ.pop("COZEMPIC_NO_GLOBAL_INIT", None)
+            marker = self._stub_marker(tmp)
+            with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                with mock.patch.object(cli.Path, "home", return_value=Path(tmp)):
+                    with mock.patch.object(cli.sys.stdin, "isatty", return_value=True):
+                        with mock.patch.object(cli.sys.stderr, "isatty", return_value=True):
+                            with mock.patch("builtins.input", return_value="y"):
+                                cli._maybe_global_init(["list"])
+                    self.assertTrue((Path(tmp) / ".claude" / "settings.json").exists())
+                    self.assertTrue(marker.exists())
+
+    def test_interactive_no_skips_install_but_marks(self):
+        """User declined — don't install, but DO set marker so we never ask again."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            self._stub_home_claude(tmp)
+            os.environ.pop("COZEMPIC_NO_GLOBAL_INIT", None)
+            marker = self._stub_marker(tmp)
+            with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                with mock.patch.object(cli.Path, "home", return_value=Path(tmp)):
+                    with mock.patch.object(cli.sys.stdin, "isatty", return_value=True):
+                        with mock.patch.object(cli.sys.stderr, "isatty", return_value=True):
+                            with mock.patch("builtins.input", return_value="n"):
+                                cli._maybe_global_init(["list"])
+                    self.assertFalse((Path(tmp) / ".claude" / "settings.json").exists())
+                    self.assertTrue(marker.exists())  # marker set so we don't re-prompt
+
+    def test_interactive_ctrl_c_treated_as_no(self):
+        """KeyboardInterrupt at the prompt is treated as decline (no install, marker set)."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            self._stub_home_claude(tmp)
+            os.environ.pop("COZEMPIC_NO_GLOBAL_INIT", None)
+            marker = self._stub_marker(tmp)
+            with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                with mock.patch.object(cli.Path, "home", return_value=Path(tmp)):
+                    with mock.patch.object(cli.sys.stdin, "isatty", return_value=True):
+                        with mock.patch.object(cli.sys.stderr, "isatty", return_value=True):
+                            with mock.patch("builtins.input", side_effect=KeyboardInterrupt):
+                                cli._maybe_global_init(["list"])
+                    self.assertFalse((Path(tmp) / ".claude" / "settings.json").exists())
+                    self.assertTrue(marker.exists())
+
+    def test_version_check_triggers_init(self):
+        """`cozempic --version` (no subcommand) should trigger global init."""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            self._stub_home_claude(tmp)
+            os.environ.pop("COZEMPIC_NO_GLOBAL_INIT", None)
+            marker = self._stub_marker(tmp)
+            with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                with mock.patch.object(cli.Path, "home", return_value=Path(tmp)):
+                    with mock.patch.object(cli.sys.stdin, "isatty", return_value=False):
+                        cli._maybe_global_init(["--version"])
+                    self.assertTrue((Path(tmp) / ".claude" / "settings.json").exists())
+
+    def test_help_does_not_trigger_init(self):
+        """`cozempic --help` / `-h` must NOT trigger init (purely informational)."""
+        from cozempic import cli
+        for help_flag in ("--help", "-h"):
+            with self.subTest(flag=help_flag):
+                with tempfile.TemporaryDirectory() as tmp:
+                    self._stub_home_claude(tmp)
+                    os.environ.pop("COZEMPIC_NO_GLOBAL_INIT", None)
+                    marker = self._stub_marker(tmp)
+                    with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                        with mock.patch.object(cli.Path, "home", return_value=Path(tmp)):
+                            cli._maybe_global_init([help_flag])
+                    self.assertFalse((Path(tmp) / ".claude" / "settings.json").exists())
+                    self.assertFalse(marker.exists())
 
 
 class TestUninstallHooks(unittest.TestCase):

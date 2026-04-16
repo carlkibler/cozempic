@@ -13,6 +13,22 @@ class Cozempic < Formula
     virtualenv_install_with_resources
   end
 
+  def caveats
+    <<~EOS
+      Cozempic is installed but not yet wired into your Claude Code settings.
+      To enable background protection on every Claude Code session in every project:
+
+        cozempic init --global
+
+      Or just run any cozempic command (e.g. `cozempic --version`) and you'll be
+      prompted on first use.
+
+      Opt out entirely with:
+
+        export COZEMPIC_NO_GLOBAL_INIT=1
+    EOS
+  end
+
   test do
     assert_match version.to_s, shell_output("#{bin}/cozempic --version")
     assert_match "diagnose", shell_output("#{bin}/cozempic --help")
