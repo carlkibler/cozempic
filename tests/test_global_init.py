@@ -184,6 +184,119 @@ class TestUninstallHooks(unittest.TestCase):
             result = uninstall_hooks(tmp)
             self.assertEqual(result["removed"], [])
 
+    def test_mixed_entry_preserves_user_commands(self):
+        """An entry containing BOTH cozempic and user commands in its `hooks`
+        list must only lose the cozempic commands. Regression for 'uninstall
+        nukes user commands in shared entries' (bug 4.1)."""
+        from cozempic.init import uninstall_hooks, HOOK_SCHEMA_MARKER
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".claude").mkdir()
+            settings_path = Path(tmp) / ".claude" / "settings.json"
+            settings_path.write_text(json.dumps({
+                "hooks": {
+                    "SessionStart": [{
+                        "matcher": "",
+                        "hooks": [
+                            # User command (no cozempic, no schema marker)
+                            {"type": "command", "command": "echo 'my-hook'"},
+                            # Cozempic command with current schema marker
+                            {"type": "command", "command": f"cozempic guard --daemon # {HOOK_SCHEMA_MARKER}"},
+                        ],
+                    }],
+                }
+            }))
+            result = uninstall_hooks(tmp)
+            self.assertTrue(result["removed"], "expected at least one removal")
+            after = json.loads(settings_path.read_text())
+            remaining = after["hooks"]["SessionStart"][0]["hooks"]
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(remaining[0]["command"], "echo 'my-hook'")
+
+    def test_malformed_json_does_not_crash(self):
+        from cozempic.init import uninstall_hooks
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".claude").mkdir()
+            settings_path = Path(tmp) / ".claude" / "settings.json"
+            settings_path.write_text("{not valid json")
+            result = uninstall_hooks(tmp)
+            self.assertEqual(result["removed"], [])
+            self.assertIn("error", result)
+
+
+class TestStaleHookRefresh(unittest.TestCase):
+    def test_stale_cozempic_hook_gets_refreshed(self):
+        """A settings.json with a pre-schema cozempic hook (old command string,
+        no schema marker) must be upgraded to the current schema on wire_hooks."""
+        from cozempic.init import wire_hooks, HOOK_SCHEMA_MARKER
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".claude").mkdir()
+            settings_path = Path(tmp) / ".claude" / "settings.json"
+            settings_path.write_text(json.dumps({
+                "hooks": {
+                    "SessionStart": [{
+                        "matcher": "",
+                        "hooks": [
+                            # Stale cozempic hook — has "cozempic" but no schema marker
+                            {"type": "command", "command": "cozempic guard --daemon"},
+                        ],
+                    }],
+                }
+            }))
+            result = wire_hooks(tmp)
+            # The event should be marked "updated" (not skipped, not added)
+            self.assertIn("SessionStart[]", result["updated"])
+            after = json.loads(settings_path.read_text())
+            cmd = after["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            self.assertIn(HOOK_SCHEMA_MARKER, cmd, "schema marker must be present after refresh")
+
+    def test_current_schema_hook_is_skipped(self):
+        """wire_hooks on an already-current settings.json must not touch it."""
+        from cozempic.init import wire_hooks, run_init
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".claude").mkdir()
+            # Initial init
+            run_init(tmp, skip_slash=True)
+            settings_path = Path(tmp) / ".claude" / "settings.json"
+            first_content = settings_path.read_text()
+            # Second init — everything should be skipped
+            result = wire_hooks(tmp)
+            self.assertEqual(result["added"], [])
+            self.assertEqual(result["updated"], [])
+            self.assertGreater(len(result["skipped"]), 0)
+            # File unchanged
+            self.assertEqual(first_content, settings_path.read_text())
+
+
+class TestPIDReuseCheck(unittest.TestCase):
+    def test_is_cozempic_guard_process_false_for_other_pid(self):
+        """Random PID (e.g. init, 1) should not be identified as a cozempic guard."""
+        from cozempic.guard import _is_cozempic_guard_process
+        # PID 1 exists on every Unix but isn't cozempic
+        self.assertFalse(_is_cozempic_guard_process(1))
+
+    def test_is_cozempic_guard_process_false_for_nonexistent(self):
+        from cozempic.guard import _is_cozempic_guard_process
+        # Almost certainly not a real PID
+        self.assertFalse(_is_cozempic_guard_process(999999))
+
+
+class TestDoSMarkerOnFailure(unittest.TestCase):
+    def test_marker_touched_on_run_init_failure(self):
+        """If run_init raises, the marker must still be touched to prevent
+        a DoS loop of re-attempts. (Bug 6.1)"""
+        from cozempic import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            # Fake home with .claude dir
+            (Path(tmp) / ".claude").mkdir()
+            os.environ.pop("COZEMPIC_NO_GLOBAL_INIT", None)
+            marker = Path(tmp) / ".cozempic_global_initialized"
+            with mock.patch.object(cli, "_GLOBAL_INIT_MARKER", marker):
+                with mock.patch.object(cli.Path, "home", return_value=Path(tmp)):
+                    with mock.patch.object(cli.sys.stdin, "isatty", return_value=False):
+                        with mock.patch.object(cli, "run_init", side_effect=OSError("boom")):
+                            cli._maybe_global_init(["list"])
+            self.assertTrue(marker.exists(), "marker must be touched even on failure")
+
 
 if __name__ == "__main__":
     unittest.main()

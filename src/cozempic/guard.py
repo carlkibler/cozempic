@@ -1081,6 +1081,30 @@ def start_guard_daemon(
     }
 
 
+def _is_cozempic_guard_process(pid: int) -> bool:
+    """Verify that `pid` is actually a cozempic guard daemon before we signal it.
+
+    Guards against PID reuse: when our daemon exits and the kernel recycles
+    its PID to an unrelated user process, a blind `os.kill(pid, SIGTERM)` on
+    the recycled PID is a confused-deputy bug (we'd kill something arbitrary).
+    Inspects the process's argv for "cozempic" + "guard".
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "args="],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+        if result.returncode != 0:
+            return False
+        args = (result.stdout or "").strip()
+        return "cozempic" in args and "guard" in args
+    except (subprocess.SubprocessError, OSError):
+        # If we can't verify, err on the side of NOT signaling a potentially
+        # unrelated process. The session stays with the existing daemon (or
+        # no daemon), which is strictly safer than signaling the wrong one.
+        return False
+
+
 def reload_self_daemon(
     cwd: str | None = None,
     session_id: str | None = None,
@@ -1112,26 +1136,43 @@ def reload_self_daemon(
     if not session_id:
         return {"reloaded": False, "reason": "could not detect session"}
 
+    session_id = _normalize_session_id(session_id)
+
     old_pid = _is_guard_running_for_session(session_id)
     if not old_pid:
         return {"reloaded": False, "reason": "no daemon running for session"}
 
-    try:
-        os.kill(old_pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
+    # Verify the PID is actually our daemon — defend against PID reuse.
+    if not _is_cozempic_guard_process(old_pid):
+        # Stale pid file pointing at a recycled (non-cozempic) PID. Clear it
+        # and spawn a fresh daemon; do NOT signal the unrelated process.
         _pid_file_for_session(session_id).unlink(missing_ok=True)
-        return {"reloaded": False, "reason": "old daemon already gone"}
-
-    if not _wait_for_exit(old_pid, timeout=10.0):
+        old_pid = None
+    else:
         try:
-            os.kill(old_pid, signal.SIGKILL)
+            os.kill(old_pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
-            pass
-        _pid_file_for_session(session_id).unlink(missing_ok=True)
+            _pid_file_for_session(session_id).unlink(missing_ok=True)
+            old_pid = None
 
-    # Always re-activate what we just disabled. Retry once on transient
-    # failures (subprocess hiccups, file-system races) so we don't leave the
-    # session unprotected.
+        if old_pid is not None and not _wait_for_exit(old_pid, timeout=10.0):
+            # Didn't exit on SIGTERM — escalate, but only if we still see our
+            # daemon (guard against the unlikely race where another process
+            # grabbed the PID right as the old daemon finally died).
+            if _is_cozempic_guard_process(old_pid):
+                try:
+                    os.kill(old_pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            _pid_file_for_session(session_id).unlink(missing_ok=True)
+        elif old_pid is not None:
+            # Clean exit — unlink pid file so start_guard_daemon sees a clean state
+            # (guards against PID-reuse false "already_running" on the next spawn).
+            _pid_file_for_session(session_id).unlink(missing_ok=True)
+
+    # Always re-activate what we just disabled. Retry once on transient failures,
+    # but NOT on `already_running` (that means a concurrent SessionStart hook
+    # already spawned a new daemon — accept that one, don't start a second).
     daemon_args = dict(
         cwd=cwd,
         threshold_mb=threshold_mb,
@@ -1145,18 +1186,23 @@ def reload_self_daemon(
         session_id=session_id,
     )
     result = start_guard_daemon(**daemon_args)
-    if not result.get("started"):
+    if not result.get("started") and not result.get("already_running"):
         time.sleep(1)
-        # Clear any stale pid file the failed first attempt may have left.
         _pid_file_for_session(session_id).unlink(missing_ok=True)
         result = start_guard_daemon(**daemon_args)
 
+    reloaded = bool(result.get("started") or result.get("already_running"))
+    if reloaded:
+        reason = "ok"
+    else:
+        reason = "could not start fresh daemon after retry — session is unprotected"
+
     return {
-        "reloaded": result.get("started", False),
+        "reloaded": reloaded,
         "old_pid": old_pid,
         "new_pid": result.get("pid"),
         "log_file": result.get("log_file"),
-        "reason": "ok" if result.get("started") else "could not start fresh daemon after retry — session is unprotected",
+        "reason": reason,
     }
 
 

@@ -1178,6 +1178,40 @@ _AUTO_INIT_SKIP_CMDS = frozenset({
 _GLOBAL_INIT_MARKER = Path.home() / ".cozempic_global_initialized"
 
 
+def _prompt_with_timeout(msg: str, timeout: int = 30, default: str = "n") -> str:
+    """input() wrapped with a hard timeout so we never hang a cozempic invocation.
+
+    Returns `default` on timeout, EOF, or Ctrl-C. TTY-detection should have
+    already been done by the caller; this is a belt-and-suspenders guard
+    against fooled detection (tmux piping quirks, etc.).
+    """
+    import signal as _signal
+    def _timeout_handler(signum, frame):
+        raise TimeoutError
+    prev_handler = None
+    try:
+        prev_handler = _signal.signal(_signal.SIGALRM, _timeout_handler)
+        _signal.alarm(timeout)
+        try:
+            return input(msg).strip().lower()
+        except (EOFError, KeyboardInterrupt, TimeoutError):
+            print("", file=sys.stderr)
+            return default
+    except (ValueError, OSError, AttributeError):
+        # SIGALRM unavailable (Windows, non-main thread) — fall back to no timeout
+        try:
+            return input(msg).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return default
+    finally:
+        try:
+            _signal.alarm(0)
+            if prev_handler is not None:
+                _signal.signal(_signal.SIGALRM, prev_handler)
+        except (ValueError, OSError, AttributeError):
+            pass
+
+
 def _maybe_global_init(argv: list[str]) -> None:
     """Wire cozempic into ~/.claude/settings.json on first cozempic invocation
     on this machine — guarantees protection for every Claude Code session in
@@ -1242,11 +1276,7 @@ def _maybe_global_init(argv: list[str]) -> None:
                 "  Wires hooks into ~/.claude/settings.json (one-time, reversible).",
                 file=sys.stderr,
             )
-            try:
-                response = input("  Enable? [Y/n] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print("", file=sys.stderr)
-                response = "n"
+            response = _prompt_with_timeout("  Enable? [Y/n] ", timeout=30, default="n")
         except OSError:
             response = ""  # treat fd errors as "go ahead silently"
 
@@ -1264,8 +1294,17 @@ def _maybe_global_init(argv: list[str]) -> None:
     try:
         result = run_init(str(Path.home()), skip_slash=True)
     except Exception as exc:
+        # Touch the marker even on failure — prevents a DoS loop where every
+        # single cozempic invocation re-attempts a failing run_init and spams
+        # stderr. User can `rm ~/.cozempic_global_initialized` to retry after
+        # addressing the underlying problem (read-only file, permissions, etc).
+        try:
+            _GLOBAL_INIT_MARKER.touch()
+        except OSError:
+            pass
         print(
-            f"  Cozempic: global init skipped ({exc}). Run `cozempic init --global` manually.",
+            f"  Cozempic: global init failed ({exc}). Run `cozempic init --global` manually "
+            "after fixing; `rm ~/.cozempic_global_initialized` to re-ask on next invocation.",
             file=sys.stderr,
         )
         return
@@ -1300,8 +1339,12 @@ def _maybe_global_init(argv: list[str]) -> None:
 
 
 def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
-    """Return True if any settings file under .claude/ already references cozempic in a hook."""
+    """Return True if any settings file under .claude/ has cozempic hooks AT THE
+    CURRENT SCHEMA VERSION. Returns False (=> needs refresh) when hooks exist
+    but are stale, so auto-init can upgrade them.
+    """
     import json as _json
+    from .init import has_current_schema
     for name in ("settings.json", "settings.local.json"):
         p = claude_dir / name
         if not p.exists():
@@ -1310,18 +1353,8 @@ def _project_has_cozempic_hooks(claude_dir: Path) -> bool:
             data = _json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        hooks = data.get("hooks", {})
-        if not isinstance(hooks, dict):
-            continue
-        for entries in hooks.values():
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                for h in entry.get("hooks", []) or []:
-                    if "cozempic" in str(h.get("command", "")):
-                        return True
+        if has_current_schema(data):
+            return True
     return False
 
 
