@@ -43,7 +43,9 @@ Then follow the appropriate section below based on their choice.
 
 If the user passes arguments (e.g., `/cozempic diagnose`, `/cozempic treat`, `/cozempic guard`), skip the menu and go directly to the relevant section.
 
-If the user passes a prescription name (e.g., `/cozempic aggressive`), go to Treat & Reload with that prescription.
+**Routing for ambiguous args:**
+- `/cozempic treat` (no qualifier) → **Treat & Reload** (the recommended one-step flow). Only use **Treat Only** if the user explicitly says "in place", "no resume", "manual", "don't restart", or similar.
+- `/cozempic <prescription>` (e.g., `/cozempic aggressive`) → Treat & Reload with that prescription.
 
 ---
 
@@ -89,9 +91,9 @@ Ask if they'd like to treat.
 
 4. Tell the user: *"Treatment applied. Type `/exit` — a new Terminal window will open automatically with the pruned session."*
 
-## Treat Only
+## Treat Only (manual resume — use sparingly)
 
-Same as Treat & Reload but without the auto-resume. Use when the user wants to stay in the current session or resume manually.
+Same as Treat & Reload but without the auto-resume watcher. **Only use this path when the user explicitly opts out of auto-resume** ("in place", "no restart", "I'll resume manually", debugging multi-pane setups, etc.). Default to Treat & Reload otherwise.
 
 1. Run diagnosis first:
    ```bash
@@ -108,7 +110,7 @@ Same as Treat & Reload but without the auto-resume. Use when the user wants to s
    cozempic treat current -rx <prescription> --execute
    ```
 
-4. Tell the user: *"Treatment applied. To resume with the pruned session, exit and run `claude --resume`."*
+4. Tell the user: *"Treatment applied. To resume with the pruned session, exit and run `claude --resume`. (Tip: next time `cozempic reload` does this in one step — `/exit` and a fresh terminal opens automatically.)"*
 
 ## Guard Mode (Agent Team Protection)
 

@@ -1081,6 +1081,76 @@ def start_guard_daemon(
     }
 
 
+def reload_self_daemon(
+    cwd: str | None = None,
+    session_id: str | None = None,
+    threshold_mb: float = 50.0,
+    soft_threshold_mb: float | None = None,
+    rx_name: str = "standard",
+    interval: int = 30,
+    auto_reload: bool = True,
+    reactive: bool = True,
+    threshold_tokens: int | None = None,
+    soft_threshold_tokens: int | None = None,
+) -> dict:
+    """Gracefully restart the running guard daemon for this session.
+
+    Used after an in-place cozempic upgrade so the daemon picks up the new code
+    on disk. SIGTERMs the existing daemon (it writes a final checkpoint via the
+    SIGTERM handler), waits for it to exit, then spawns a fresh daemon with the
+    same args. The new daemon imports from the freshly-installed package files.
+
+    Returns dict: {reloaded: bool, old_pid, new_pid, log_file, reason}.
+    """
+    cwd = cwd or os.getcwd()
+
+    if not session_id:
+        sess = find_current_session(cwd)
+        if sess:
+            session_id = sess.get("session_id", "")
+
+    if not session_id:
+        return {"reloaded": False, "reason": "could not detect session"}
+
+    old_pid = _is_guard_running_for_session(session_id)
+    if not old_pid:
+        return {"reloaded": False, "reason": "no daemon running for session"}
+
+    try:
+        os.kill(old_pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        _pid_file_for_session(session_id).unlink(missing_ok=True)
+        return {"reloaded": False, "reason": "old daemon already gone"}
+
+    if not _wait_for_exit(old_pid, timeout=10.0):
+        try:
+            os.kill(old_pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        _pid_file_for_session(session_id).unlink(missing_ok=True)
+
+    result = start_guard_daemon(
+        cwd=cwd,
+        threshold_mb=threshold_mb,
+        soft_threshold_mb=soft_threshold_mb,
+        rx_name=rx_name,
+        interval=interval,
+        auto_reload=auto_reload,
+        reactive=reactive,
+        threshold_tokens=threshold_tokens,
+        soft_threshold_tokens=soft_threshold_tokens,
+        session_id=session_id,
+    )
+
+    return {
+        "reloaded": result.get("started", False),
+        "old_pid": old_pid,
+        "new_pid": result.get("pid"),
+        "log_file": result.get("log_file"),
+        "reason": "ok" if result.get("started") else "could not start fresh daemon",
+    }
+
+
 def _fmt_prune_result(result: dict) -> str:
     """Format a prune cycle result, leading with tokens if available."""
     orig_tok = result.get("original_tokens")

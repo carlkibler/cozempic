@@ -598,6 +598,26 @@ def cmd_guard(args):
     if getattr(args, "system_overhead_tokens", None):
         os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = str(args.system_overhead_tokens)
 
+    if getattr(args, "reload_self", False):
+        from .guard import reload_self_daemon
+        result = reload_self_daemon(
+            cwd=args.cwd or os.getcwd(),
+            session_id=session_id,
+            threshold_mb=args.threshold,
+            soft_threshold_mb=args.soft_threshold,
+            rx_name=args.rx or "standard",
+            interval=args.interval,
+            auto_reload=not args.no_reload,
+            reactive=not args.no_reactive,
+            threshold_tokens=args.threshold_tokens,
+            soft_threshold_tokens=args.soft_threshold_tokens,
+        )
+        if result.get("reloaded"):
+            print(f"  Guard daemon reloaded (PID {result['old_pid']} → {result['new_pid']})")
+        else:
+            print(f"  Guard reload skipped: {result.get('reason')}")
+        return
+
     if args.daemon:
         result = start_guard_daemon(
             cwd=args.cwd or os.getcwd(),
@@ -995,6 +1015,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_guard.add_argument("--no-reload", action="store_true", help="Prune without auto-reload at hard threshold")
     p_guard.add_argument("--no-reactive", action="store_true", help="Disable reactive overflow recovery (kqueue/polling watcher)")
     p_guard.add_argument("--daemon", action="store_true", help="Run in background (PID file prevents double-starts)")
+    p_guard.add_argument("--reload-self", action="store_true", help="Gracefully restart the running daemon for this session (used after upgrading cozempic in place)")
     p_guard.add_argument("--session", help="Explicit session ID or path (bypasses auto-detection)")
     p_guard.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead token estimate (default: 21000). Increase for heavy configs with many rules files, MCP servers, or large CLAUDE.md")
 
