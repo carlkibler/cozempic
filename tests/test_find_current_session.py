@@ -27,6 +27,7 @@ class TestStrictMode:
 
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
+            patch("cozempic.session.get_codex_sessions_dir", return_value=tmp_path / "codex-sessions"),
             patch("cozempic.session._session_id_from_process", return_value=None),
         ):
             result = find_current_session(cwd="/unrelated/path", strict=True)
@@ -40,6 +41,7 @@ class TestStrictMode:
 
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
+            patch("cozempic.session.get_codex_sessions_dir", return_value=tmp_path / "codex-sessions"),
             patch("cozempic.session._session_id_from_process", return_value=None),
         ):
             result = find_current_session(cwd="/unrelated/path", strict=False)
@@ -55,6 +57,7 @@ class TestStrictMode:
 
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
+            patch("cozempic.session.get_codex_sessions_dir", return_value=tmp_path / "codex-sessions"),
             patch("cozempic.session._session_id_from_process", return_value=session_id),
         ):
             result = find_current_session(strict=True)
@@ -72,6 +75,7 @@ class TestStrictMode:
 
         with (
             patch("cozempic.session.get_projects_dir", return_value=tmp_path / "projects"),
+            patch("cozempic.session.get_codex_sessions_dir", return_value=tmp_path / "codex-sessions"),
             patch("cozempic.session._session_id_from_process", return_value=None),
         ):
             result = find_current_session(cwd=cwd, strict=True)
@@ -85,6 +89,7 @@ class TestStrictMode:
 
         with (
             patch("cozempic.session.get_projects_dir", return_value=projects),
+            patch("cozempic.session.get_codex_sessions_dir", return_value=tmp_path / "codex-sessions"),
             patch("cozempic.session._session_id_from_process", return_value=None),
         ):
             assert find_current_session(strict=True) is None

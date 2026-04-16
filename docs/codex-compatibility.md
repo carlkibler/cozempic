@@ -1,12 +1,23 @@
 # Codex Compatibility Sketch
 
-**Status:** design only, not implemented
+**Status:** MVP implemented
 
-## Short answer
+## Current state
 
-Cozempic does not work with Codex as a drop-in today.
+Cozempic now has a first real Codex MVP:
 
-It is currently Claude Code-specific in three big ways:
+- discovers Codex sessions from `~/.codex/sessions/...`
+- detects the current Codex session by cwd
+- reads Codex transcript rows for `list`, `current`, `diagnose`, `treat`, and `strategy`
+- estimates Codex context usage from `token_count` events
+- prunes Codex reasoning rows and oversized tool outputs
+
+It is **not** full feature parity with Claude Code. Claude-specific hook, guard,
+checkpoint, and resume flows remain Claude-only.
+
+## Why Codex needed a separate path
+
+The original Cozempic implementation was Claude-specific in three big ways:
 
 1. **Storage layout**
    - Claude: `~/.claude/projects/<project>/*.jsonl`
@@ -18,7 +29,7 @@ It is currently Claude Code-specific in three big ways:
    - Cozempic relies on Claude hooks, Claude compaction boundaries, and `claude --resume`.
    - Codex uses different storage, no matching hook model, and different resume/runtime behavior.
 
-## What a real Codex adapter would need
+## What is still missing for Codex
 
 ### 1. A pluggable backend layer
 
@@ -75,26 +86,35 @@ A Codex version should likely focus on:
 
 It should **not** pretend Claude features exist when they do not.
 
-### 5. Separate integration surface
+### 1. Better Codex-native strategies
 
-Probable command shape:
+Current MVP mainly benefits from:
 
-- `cozempic diagnose --backend codex`
-- `cozempic treat --backend codex`
-- or auto-detect backend from cwd / session path
+- reasoning stripping
+- tool output trimming
+- old tool-result compaction
+- duplicate text/document trimming
 
-But hook setup should remain backend-specific:
+A fuller Codex backend should add more Codex-specific strategies instead of
+leaning mostly on Claude-compatible abstractions.
 
-- `cozempic init` for Claude project hooks
-- a future `cozempic codex-init` only if Codex gains an equivalent integration point worth supporting
+### 2. Better post-prune token estimation
 
-## Recommended implementation order
+Codex exposes rate-limit occupancy better than direct “current context tokens,”
+so post-prune token counts are still approximations.
 
-1. **Backend abstraction**
-2. **Read-only Codex diagnose**
-3. **Codex-safe treat (dry-run first)**
-4. **Codex write path with backups**
-5. **Optional Codex continuity extras**
+### 3. Codex-native continuity features
+
+Not implemented:
+
+- Codex equivalent of guard/daemon protection
+- Codex equivalent of checkpoint/recovery reinjection
+- Codex equivalent of automatic resume/reload orchestration
+
+### 4. Clearer backend-specific CLI UX
+
+Today, unsupported commands are gated at runtime. A nicer version would make
+backend support clearer in help text and docs.
 
 ## Non-goals
 
@@ -104,9 +124,11 @@ But hook setup should remain backend-specific:
 
 ## Acceptance bar
 
-A Codex backend is only “real” when it has:
+The current MVP clears the minimum bar:
 
-- fixture-backed transcript parsing tests
-- dry-run diagnosis output on real Codex session samples
-- backup-safe write tests
-- explicit per-strategy compatibility coverage
+- fixture-backed Codex transcript tests
+- current-session detection for Codex
+- Codex-safe dry-run and write-path pruning
+- explicit unsupported-command gating for Claude-only features
+
+The next bar is “good Codex support,” not just “real Codex support.”
