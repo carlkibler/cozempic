@@ -1,6 +1,6 @@
 # Cozempic
 
-![Downloads](https://img.shields.io/badge/downloads-35k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.7.0-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Downloads](https://img.shields.io/badge/downloads-35k%2B-brightgreen) ![Version](https://img.shields.io/badge/version-1.7.1-blue) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 **35,000+ power users** trust Cozempic to keep their Claude Code sessions lean.
 
@@ -246,6 +246,12 @@ After `cozempic init`, these hooks are wired automatically:
 ```
 
 ## Changelog
+
+### v1.7.1
+
+- **`cozempic reload --session <id|path>`** escape hatch when auto-detect fails in multi-agent sessions. Previously reload had no way to recover from ambiguous session detection, leaving users stuck. Matches `guard --session`.
+- Error message now names the flag to use (was "use an explicit session ID" with no instruction on how)
+- **Auto-update message clarified**: after upgrade, says "active on next run (this process still vX.Y.Z)" — users no longer think the upgrade failed when `--version` still prints the old number (the running Python process can't hot-swap its own code)
 
 ### v1.7.0
 

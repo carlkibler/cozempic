@@ -373,11 +373,23 @@ def cmd_strategy(args):
 def cmd_reload(args):
     """Treat the current session, then spawn a watcher that auto-resumes Claude."""
     cwd = args.cwd or os.getcwd()
-    sess = find_current_session(cwd, strict=True)
+    sess = None
+    explicit_session = getattr(args, "session", None)
+    if explicit_session:
+        # User-provided session — path, full UUID, or UUID prefix.
+        try:
+            path = resolve_session(explicit_session, strict=True)
+        except SystemExit:
+            raise
+        session_id = path.stem
+        sess = {"session_id": session_id, "path": path, "project": path.parent.name}
+    else:
+        sess = find_current_session(cwd, strict=True)
     if not sess:
         print("Could not detect current session.", file=sys.stderr)
-        print("Cannot determine session unambiguously — use an explicit session ID.", file=sys.stderr)
-        print("Make sure you're running from a directory with a Claude Code project.", file=sys.stderr)
+        print("Cannot determine session unambiguously — pass one explicitly:", file=sys.stderr)
+        print("  cozempic reload --session <uuid-or-path> -rx <prescription>", file=sys.stderr)
+        print("Use 'cozempic list' to find the session ID.", file=sys.stderr)
         sys.exit(1)
 
     # Prefer sidecar cwd (exact path, handles hyphens and special chars).
@@ -916,7 +928,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cozempic",
         description="Context weight-loss tool for Claude Code — prune bloated JSONL conversation files",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 1.7.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.7.1")
     parser.add_argument("--context-window", type=int, default=None, help="Override context window size in tokens (e.g. 1000000 for 1M beta)")
     parser.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead estimate (default: 21000). Increase for heavy rules/MCP configs.")
     sub = parser.add_subparsers(dest="command")
@@ -960,6 +972,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_reload.add_argument("--cwd", help="Working directory (default: current)")
     p_reload.add_argument("-rx", help="Prescription: gentle, standard, aggressive (default: standard)")
     p_reload.add_argument("--thinking-mode", choices=["remove", "truncate", "signature-only"])
+    p_reload.add_argument("--session", help="Explicit session ID, UUID prefix, or .jsonl path (bypasses auto-detection)")
 
     # checkpoint
     p_cp = sub.add_parser("checkpoint", help="Save team/agent state from the current session (no pruning)")

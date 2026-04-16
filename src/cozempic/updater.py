@@ -176,7 +176,11 @@ def maybe_auto_update(force: bool = False, silent: bool = False) -> None:
             except Exception:
                 pass
         if not silent:
-            print(f"  Cozempic: updated to v{latest}.", flush=True)
+            # The current Python process is still running v{__version__} code —
+            # new code is active on next invocation. Say so explicitly so
+            # users don't think the upgrade failed when --version still prints
+            # the old number.
+            print(f"  Cozempic: updated to v{latest} — active on next run (this process still v{__version__}).", flush=True)
     else:
         if not silent:
             print(f"  Cozempic: auto-update failed. Run: pip install --upgrade cozempic", flush=True)
