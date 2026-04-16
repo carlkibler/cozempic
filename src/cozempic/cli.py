@@ -582,6 +582,7 @@ def cmd_post_compact(args):
 def cmd_guard(args):
     """Start the guard daemon to prevent compaction-induced state loss."""
     session_id = args.session or None
+    claude_pid = args.claude_pid or find_claude_pid()
 
     if getattr(args, "system_overhead_tokens", None):
         os.environ["COZEMPIC_SYSTEM_OVERHEAD_TOKENS"] = str(args.system_overhead_tokens)
@@ -598,6 +599,7 @@ def cmd_guard(args):
             threshold_tokens=args.threshold_tokens,
             soft_threshold_tokens=args.soft_threshold_tokens,
             session_id=session_id,
+            claude_pid=claude_pid,
         )
         if result["already_running"]:
             print(f"  Guard already running (PID {result['pid']})")
@@ -617,6 +619,7 @@ def cmd_guard(args):
         threshold_tokens=args.threshold_tokens,
         soft_threshold_tokens=args.soft_threshold_tokens,
         session_id=session_id,
+        claude_pid=claude_pid,
     )
 
 
@@ -983,6 +986,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_guard.add_argument("--no-reactive", action="store_true", help="Disable reactive overflow recovery (kqueue/polling watcher)")
     p_guard.add_argument("--daemon", action="store_true", help="Run in background (PID file prevents double-starts)")
     p_guard.add_argument("--session", help="Explicit session ID or path (bypasses auto-detection)")
+    p_guard.add_argument("--claude-pid", type=int, default=None, help=argparse.SUPPRESS)
     p_guard.add_argument("--system-overhead-tokens", type=int, default=None, help="Override system overhead token estimate (default: 21000). Increase for heavy configs with many rules files, MCP servers, or large CLAUDE.md")
 
     # init

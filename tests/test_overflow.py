@@ -208,6 +208,36 @@ class TestOverflowDetection(unittest.TestCase):
         finally:
             breaker.reset()
 
+    def test_recovery_uses_explicit_claude_pid(self):
+        breaker = CircuitBreaker(session_id="test-explicit-pid", max_recoveries=3)
+        breaker.reset()
+        try:
+            self._write_lines([json.dumps({"type": "user", "message": "hello"})])
+            recovery = OverflowRecovery(
+                self.session_path,
+                "test-explicit-pid",
+                self.tmpdir,
+                breaker,
+                danger_threshold_mb=100.0,
+                claude_pid=7777,
+            )
+
+            with (
+                patch.object(recovery, "detect_overflow", return_value=True),
+                patch("cozempic.guard.guard_prune_cycle", return_value={
+                    "saved_mb": 1.0,
+                    "original_tokens": 1000,
+                    "final_tokens": 500,
+                }),
+                patch("cozempic.guard._terminate_and_resume") as mock_reload,
+                patch("cozempic.session.find_claude_pid", return_value=None),
+            ):
+                recovery.recover()
+
+            mock_reload.assert_called_once_with(7777, self.tmpdir, session_id="test-explicit-pid")
+        finally:
+            breaker.reset()
+
 
 class TestJsonlWatcher(unittest.TestCase):
 

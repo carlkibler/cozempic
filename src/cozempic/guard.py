@@ -214,6 +214,7 @@ def start_guard(
     threshold_tokens: int | None = None,
     soft_threshold_tokens: int | None = None,
     session_id: str | None = None,
+    claude_pid: int | None = None,
 ) -> None:
     """Start the guard daemon with tiered pruning.
 
@@ -327,6 +328,7 @@ def start_guard(
             session_path, sess["session_id"], cwd or os.getcwd(), breaker,
             danger_threshold_mb=danger_mb,
             danger_threshold_tokens=danger_tokens,
+            claude_pid=claude_pid,
         )
         overflow_watcher = JsonlWatcher(
             str(session_path), on_growth=recovery.on_file_growth,
@@ -345,8 +347,9 @@ def start_guard(
         sys.exit(0)
     signal.signal(signal.SIGTERM, _graceful_shutdown)
 
-    # Claude process watchdog — detect exit even if Stop hook doesn't fire (#29767)
-    claude_pid = find_claude_pid()
+    # Resolve Claude before daemonization or other reparenting can obscure it.
+    if claude_pid is None:
+        claude_pid = find_claude_pid()
     claude_alive = True
 
     prune_count = 0
@@ -547,6 +550,7 @@ def guard_prune_cycle(
     auto_reload: bool = True,
     cwd: str = "",
     session_id: str | None = None,
+    claude_pid: int | None = None,
 ) -> dict:
     """Execute a single guard prune cycle.
 
@@ -655,9 +659,9 @@ def guard_prune_cycle(
 
     # Trigger reload if configured — terminate Claude then auto-resume
     if auto_reload:
-        claude_pid = find_claude_pid()
-        if claude_pid:
-            _terminate_and_resume(claude_pid, cwd, session_id=session_id)
+        reload_pid = claude_pid if claude_pid is not None else find_claude_pid()
+        if reload_pid:
+            _terminate_and_resume(reload_pid, cwd, session_id=session_id)
             result["reloading"] = True
         else:
             resume_flag = f"--resume {session_id}" if session_id else "--resume"
@@ -975,6 +979,7 @@ def start_guard_daemon(
     threshold_tokens: int | None = None,
     soft_threshold_tokens: int | None = None,
     session_id: str | None = None,
+    claude_pid: int | None = None,
 ) -> dict:
     """Start the guard as a background daemon.
 
@@ -1027,6 +1032,9 @@ def start_guard_daemon(
     log_file = Path("/tmp") / f"cozempic_guard_{pid_key}.log"
     pid_path = Path("/tmp") / f"cozempic_guard_{pid_key}.pid"
 
+    if claude_pid is None:
+        claude_pid = find_claude_pid()
+
     # Build the guard command
     cmd_parts = [
         sys.executable, "-m", "cozempic.cli", "guard",
@@ -1047,6 +1055,8 @@ def start_guard_daemon(
         cmd_parts.extend(["--soft-threshold-tokens", str(soft_threshold_tokens)])
     if session_id is not None:
         cmd_parts.extend(["--session", _normalize_session_id(session_id)])
+    if claude_pid is not None:
+        cmd_parts.extend(["--claude-pid", str(claude_pid)])
 
     # Spawn detached process
     with open(log_file, "a", encoding="utf-8") as lf:
