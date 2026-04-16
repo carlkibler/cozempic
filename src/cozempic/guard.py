@@ -1129,7 +1129,10 @@ def reload_self_daemon(
             pass
         _pid_file_for_session(session_id).unlink(missing_ok=True)
 
-    result = start_guard_daemon(
+    # Always re-activate what we just disabled. Retry once on transient
+    # failures (subprocess hiccups, file-system races) so we don't leave the
+    # session unprotected.
+    daemon_args = dict(
         cwd=cwd,
         threshold_mb=threshold_mb,
         soft_threshold_mb=soft_threshold_mb,
@@ -1141,13 +1144,19 @@ def reload_self_daemon(
         soft_threshold_tokens=soft_threshold_tokens,
         session_id=session_id,
     )
+    result = start_guard_daemon(**daemon_args)
+    if not result.get("started"):
+        time.sleep(1)
+        # Clear any stale pid file the failed first attempt may have left.
+        _pid_file_for_session(session_id).unlink(missing_ok=True)
+        result = start_guard_daemon(**daemon_args)
 
     return {
         "reloaded": result.get("started", False),
         "old_pid": old_pid,
         "new_pid": result.get("pid"),
         "log_file": result.get("log_file"),
-        "reason": "ok" if result.get("started") else "could not start fresh daemon",
+        "reason": "ok" if result.get("started") else "could not start fresh daemon after retry — session is unprotected",
     }
 
 
