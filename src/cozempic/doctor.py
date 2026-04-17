@@ -703,7 +703,7 @@ def check_agent_model_mismatch() -> CheckResult:
     """Check for missing model config that breaks agent team inheritance.
 
     When Claude Code spawns subagents in agent teams, they may not inherit
-    the team lead's model, defaulting to claude-opus-4-6 and causing 403
+    the team lead's model, defaulting to claude-opus-4-7 and causing 403
     errors on custom or restricted endpoints.
 
     Ref: anthropics/claude-code#32368
@@ -738,7 +738,7 @@ def check_agent_model_mismatch() -> CheckResult:
             status="warning",
             message=(
                 f"Agent teams active ({len(team_dirs)} team(s)) but no ~/.claude/settings.json found. "
-                "Spawned subagents will default to claude-opus-4-6 regardless of ANTHROPIC_MODEL env var."
+                "Spawned subagents will default to claude-opus-4-7 regardless of ANTHROPIC_MODEL env var."
             ),
             fix_description='Create ~/.claude/settings.json with {"model": "your-model-id"} to ensure subagents inherit the correct model',
         )
@@ -759,9 +759,9 @@ def check_agent_model_mismatch() -> CheckResult:
             status="warning",
             message=(
                 f"Agent teams active ({len(team_dirs)} team(s)) but no model set in ~/.claude/settings.json. "
-                "Spawned subagents may default to claude-opus-4-6 causing 403 errors on restricted endpoints."
+                "Spawned subagents may default to claude-opus-4-7 causing 403 errors on restricted endpoints."
             ),
-            fix_description='Add "model": "claude-opus-4-6" to ~/.claude/settings.json to ensure subagents inherit the correct model',
+            fix_description='Add "model": "claude-opus-4-7" to ~/.claude/settings.json to ensure subagents inherit the correct model',
         )
 
     return CheckResult(

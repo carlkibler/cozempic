@@ -79,6 +79,11 @@ class TestDetectModel(unittest.TestCase):
 
 class TestDetectContextWindow(unittest.TestCase):
 
+    def test_opus_47_is_1m(self):
+        """Current Opus 4.7 defaults to 1M (standard for Claude Code Max)."""
+        messages = [make_assistant_with_model(0, "claude-opus-4-7")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
     def test_opus_46_is_1m(self):
         """Current Opus 4.6 defaults to 1M (standard for Claude Code Max)."""
         messages = [make_assistant_with_model(0, "claude-opus-4-6")]
@@ -109,6 +114,11 @@ class TestDetectContextWindow(unittest.TestCase):
         self.assertEqual(detect_context_window(messages), DEFAULT_CONTEXT_WINDOW)
 
     def test_prefix_match_versioned(self):
+        """Versioned model IDs like claude-opus-4-7-20260401 should match."""
+        messages = [make_assistant_with_model(0, "claude-opus-4-7-20260401")]
+        self.assertEqual(detect_context_window(messages), 1_000_000)
+
+    def test_prefix_match_versioned_46(self):
         """Versioned model IDs like claude-opus-4-6-20260301 should match."""
         messages = [make_assistant_with_model(0, "claude-opus-4-6-20260301")]
         self.assertEqual(detect_context_window(messages), 1_000_000)
