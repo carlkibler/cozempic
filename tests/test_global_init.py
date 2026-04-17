@@ -388,6 +388,19 @@ class TestAtomicWrite(unittest.TestCase):
             loaded = json.loads(path.read_text())
             self.assertEqual(loaded, {"hooks": {"SessionStart": []}})
 
+    def test_save_settings_preserves_permissions(self):
+        """mkstemp creates 0o600; we must restore the original file's mode."""
+        from cozempic.init import _save_settings
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            (Path(tmp) / ".claude").mkdir()
+            path.write_text("{}")
+            os.chmod(path, 0o644)
+            _save_settings(path, {"updated": True})
+            actual = stat.S_IMODE(os.stat(path).st_mode)
+            self.assertEqual(actual, 0o644, f"permissions changed to {oct(actual)}")
+
 
 class TestWireHooksGracefulParseFailure(unittest.TestCase):
     def test_malformed_settings_returns_error_not_crash(self):

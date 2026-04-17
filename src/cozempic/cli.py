@@ -1295,7 +1295,7 @@ def _maybe_global_init(argv: list[str]) -> None:
             )
             response = _prompt_with_timeout("  Enable? [Y/n] ", timeout=30, default="n")
         except OSError:
-            response = ""  # treat fd errors as "go ahead silently"
+            response = "n"  # I/O error ≠ user consent — decline, don't install
 
         # Accept common "cancel" synonyms so users who press q/quit/cancel
         # don't accidentally opt IN.

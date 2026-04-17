@@ -181,7 +181,16 @@ def _save_settings(path: Path, settings: dict) -> None:
     entire Claude Code config on a bad interrupt.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    import os as _os, tempfile as _tempfile
+    import os as _os, tempfile as _tempfile, stat as _stat
+
+    # Capture original permissions before we replace (Claude Code creates
+    # settings.json as 0o644; mkstemp creates 0o600 — we must restore).
+    orig_mode = None
+    try:
+        orig_mode = _os.stat(path).st_mode & 0o7777
+    except OSError:
+        pass  # file doesn't exist yet; default perms are fine
+
     fd, tmp_name = _tempfile.mkstemp(
         prefix=".cozempic-settings-", suffix=".tmp", dir=str(path.parent)
     )
@@ -194,12 +203,16 @@ def _save_settings(path: Path, settings: dict) -> None:
             try:
                 _os.fsync(f.fileno())
             except OSError:
-                # fsync not supported on some filesystems — atomicity still
-                # provided by os.replace(), just without durability guarantee.
                 pass
+            # Restore original file mode BEFORE replace so the target
+            # inherits the right permissions atomically.
+            if orig_mode is not None:
+                try:
+                    _os.fchmod(f.fileno(), orig_mode)
+                except OSError:
+                    pass  # fchmod unsupported (rare)
         _os.replace(tmp_path, path)
     except Exception:
-        # Cleanup on failure; never leave a half-written tempfile behind.
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:

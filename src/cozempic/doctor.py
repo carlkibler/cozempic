@@ -841,7 +841,8 @@ def check_cozempic_project_init() -> CheckResult:
                 if not isinstance(entry, dict):
                     continue
                 for h in entry.get("hooks", []) or []:
-                    if "cozempic" in str(h.get("command", "")):
+                    from .init import _is_cozempic_command
+                    if _is_cozempic_command(str(h.get("command", ""))):
                         found = True
                         break
 
@@ -892,8 +893,9 @@ def check_cozempic_hooks() -> CheckResult:
 
     for event in expected:
         entries = hooks.get(event, [])
+        from .init import _is_cozempic_command
         has_cozempic = any(
-            "cozempic" in h.get("command", "")
+            _is_cozempic_command(h.get("command", ""))
             for entry in entries
             for h in entry.get("hooks", [])
         )
