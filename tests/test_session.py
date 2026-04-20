@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from pathlib import Path
 from unittest.mock import patch
 
-from cozempic.session import MAX_LINE_BYTES, get_claude_dir, get_claude_json_path, load_messages
+from cozempic.session import (
+    MAX_LINE_BYTES,
+    find_claude_pid,
+    get_claude_dir,
+    get_claude_json_path,
+    load_messages,
+)
 
 
 class TestGetClaudeDir:
@@ -58,3 +65,31 @@ class TestLoadMessagesLimits:
         assert len(messages) == 2
         assert messages[0][1]["content"] == "first"
         assert messages[1][1]["content"] == "second"
+
+
+class TestFindClaudePid:
+    def test_finds_claude_process_in_ancestor_chain(self):
+        with (
+            patch("cozempic.session.os.getpid", return_value=400),
+            patch(
+                "cozempic.session.subprocess.run",
+                side_effect=[
+                    SimpleNamespace(stdout="300 python\n"),
+                    SimpleNamespace(stdout="200 node\n"),
+                ],
+            ),
+        ):
+            assert find_claude_pid() == 300
+
+    def test_returns_none_when_detached_guard_parent_is_systemd(self):
+        with (
+            patch("cozempic.session.os.getpid", return_value=400),
+            patch(
+                "cozempic.session.subprocess.run",
+                side_effect=[
+                    SimpleNamespace(stdout="300 python\n"),
+                    SimpleNamespace(stdout="1 systemd\n"),
+                ],
+            ),
+        ):
+            assert find_claude_pid() is None

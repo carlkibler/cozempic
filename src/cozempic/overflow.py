@@ -115,6 +115,7 @@ class OverflowRecovery:
         breaker: CircuitBreaker,
         danger_threshold_mb: float = 90.0,
         danger_threshold_tokens: int | None = None,
+        claude_pid: int | None = None,
     ):
         self.session_path = session_path
         self.session_id = session_id
@@ -122,6 +123,7 @@ class OverflowRecovery:
         self.breaker = breaker
         self.danger_threshold_bytes = int(danger_threshold_mb * 1024 * 1024)
         self.danger_threshold_tokens = danger_threshold_tokens
+        self.claude_pid = claude_pid
         self._recovering = False  # Prevent re-entrant recovery
 
     def detect_overflow(self) -> bool:
@@ -250,7 +252,7 @@ class OverflowRecovery:
             )
 
         # 6. Terminate Claude + auto-resume
-        claude_pid = find_claude_pid()
+        claude_pid = self.claude_pid if self.claude_pid is not None else find_claude_pid()
         if claude_pid:
             _terminate_and_resume(claude_pid, self.cwd, session_id=self.session_id)
             print(
