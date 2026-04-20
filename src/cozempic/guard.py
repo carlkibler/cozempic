@@ -1026,6 +1026,12 @@ def start_guard_daemon(
                     "already_running": True,
                 }
 
+    # Normalize early — session_id may be a full .jsonl path from the hook's
+    # $TRANSCRIPT variable. Must extract the UUID before using it as a filename
+    # component (otherwise "/Users/foo/..." ends up in the log/pid path).
+    if session_id:
+        session_id = _normalize_session_id(session_id)
+
     # Use session_id for PID file if available, fall back to CWD hash
     if session_id:
         pid_key = session_id[:12]
