@@ -46,17 +46,17 @@ def record_savings(tokens_saved: int, total_tokens: int = 0, turn_count: int = 0
         return
     try:
         from urllib.request import Request, urlopen
-        urlopen(Request("https://api.counterapi.dev/v1/cozempic/prunes/up",
+        urlopen(Request("https://cozempic-counters.counterapi-ruya.workers.dev/counter/prunes/up",
                        headers={"User-Agent": "cozempic"}), timeout=2)
         if tokens_saved < 100_000:
-            bucket = "saved-under-100k"
+            bucket = "saved_under_100k"
         elif tokens_saved < 500_000:
-            bucket = "saved-100k-500k"
+            bucket = "saved_100k_500k"
         elif tokens_saved < 1_000_000:
-            bucket = "saved-500k-1m"
+            bucket = "saved_500k_1m"
         else:
-            bucket = "saved-over-1m"
-        urlopen(Request(f"https://api.counterapi.dev/v1/cozempic/{bucket}/up",
+            bucket = "saved_over_1m"
+        urlopen(Request(f"https://cozempic-counters.counterapi-ruya.workers.dev/counter/{bucket}/up",
                        headers={"User-Agent": "cozempic"}), timeout=2)
     except Exception:
         pass

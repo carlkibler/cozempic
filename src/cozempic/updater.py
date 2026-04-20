@@ -15,8 +15,8 @@ from urllib.request import Request, urlopen
 from . import __version__
 
 _PYPI_URL = "https://pypi.org/pypi/cozempic/json"
-_COUNTER_URL = "https://api.counterapi.dev/v1/cozempic/auto-updates/up"
-_INSTALL_COUNTER_URL = "https://api.counterapi.dev/v1/cozempic/installs/up"
+_COUNTER_URL = "https://cozempic-counters.counterapi-ruya.workers.dev/counter/auto_updates/up"
+_INSTALL_COUNTER_URL = "https://cozempic-counters.counterapi-ruya.workers.dev/counter/installs/up"
 _CHECK_INTERVAL = 86400  # 24 hours
 _CACHE_FILE = Path.home() / ".cozempic_update_check"
 _INSTALL_SENTINEL = Path.home() / ".cozempic_installed"
