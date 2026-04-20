@@ -49,13 +49,7 @@ nix profile install github:Ruya-AI/cozempic?dir=packaging/nix
 
 AUR (`yay -S cozempic`) and MacPorts (`port install py-cozempic`) submissions are in progress — see [`packaging/README.md`](packaging/README.md) for status and PKGBUILD/Portfile sources.
 
-Then one-time setup:
-
-```bash
-cozempic init
-```
-
-That's it. The guard daemon auto-starts on every session via hooks. No second terminal needed.
+That's it. Cozempic auto-initializes on first use — hooks are wired globally, guard daemon auto-starts on every Claude Code session. No manual setup needed. Opt out with `COZEMPIC_NO_GLOBAL_INIT=1`.
 
 ### As a Claude Code Plugin
 
