@@ -315,12 +315,12 @@ class TestAgentModelMismatch(unittest.TestCase):
     def test_teams_with_model_in_settings_is_ok(self):
         (self.claude_dir / "teams" / "my-team").mkdir(parents=True)
         (self.claude_dir / "settings.json").write_text(
-            json.dumps({"model": "claude-opus-4-6"})
+            json.dumps({"model": "claude-opus-4-7"})
         )
         with patch("cozempic.doctor.get_claude_dir", return_value=self.claude_dir):
             result = check_agent_model_mismatch()
         self.assertEqual(result.status, "ok")
-        self.assertIn("claude-opus-4-6", result.message)
+        self.assertIn("claude-opus-4-7", result.message)
 
     def test_teams_without_model_in_settings_is_warning(self):
         (self.claude_dir / "teams" / "my-team").mkdir(parents=True)

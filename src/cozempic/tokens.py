@@ -69,11 +69,12 @@ def default_token_thresholds_4tier(context_window: int = DEFAULT_CONTEXT_WINDOW)
 
 # Model → context window mapping
 # Claude Code does NOT append "[1m]" to model IDs in the JSONL — the model
-# field always contains the base ID (e.g., "claude-opus-4-6"). 1M context is
+# field always contains the base ID (e.g., "claude-opus-4-7"). 1M context is
 # the standard for current models on Max plans, so we default 4.5/4.6 to 1M.
 # Users on Pro (200K) can override with COZEMPIC_CONTEXT_WINDOW=200000.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Current models — default 1M (standard for Claude Code Max plans)
+    "claude-opus-4-7": 1_000_000,
     "claude-opus-4-6": 1_000_000,
     "claude-opus-4-5": 1_000_000,
     "claude-sonnet-4-6": 1_000_000,
