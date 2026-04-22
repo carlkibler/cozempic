@@ -17,6 +17,7 @@ from ..helpers import (
 )
 from ..registry import strategy
 from ..types import Message, PruneAction, StrategyResult
+from ._config import coerce_non_negative_int
 
 
 @strategy("http-spam", "Collapse consecutive HTTP request/response messages", "aggressive", "0-2%")
@@ -248,7 +249,7 @@ def strategy_background_poll_collapse(messages: list[Message], config: dict) -> 
 @strategy("document-dedup", "Deduplicate large document blocks (CLAUDE.md injection)", "aggressive", "0-44%")
 def strategy_document_dedup(messages: list[Message], config: dict) -> StrategyResult:
     """Detect and deduplicate large text blocks that appear multiple times."""
-    min_block_size = config.get("document_dedup_min_bytes", 1024)
+    min_block_size = coerce_non_negative_int(config, "document_dedup_min_bytes", default=1024)
     actions: list[PruneAction] = []
     total_orig = sum(b for _, _, b in messages)
     total_pruned = 0
@@ -320,7 +321,7 @@ def strategy_document_dedup(messages: list[Message], config: dict) -> StrategyRe
 @strategy("mega-block-trim", "Trim any content block over 32KB", "aggressive", "safety net")
 def strategy_mega_block_trim(messages: list[Message], config: dict) -> StrategyResult:
     """Safety net: any single content block over 32KB gets truncated."""
-    max_block_bytes = config.get("mega_block_max_bytes", 32768)
+    max_block_bytes = coerce_non_negative_int(config, "mega_block_max_bytes", default=32768)
     actions: list[PruneAction] = []
     total_orig = sum(b for _, _, b in messages)
     total_pruned = 0

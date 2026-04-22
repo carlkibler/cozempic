@@ -9,6 +9,9 @@ import re
 from ..helpers import get_content_blocks, get_msg_type, is_protected, msg_bytes, set_content_blocks, text_of
 from ..registry import strategy
 from ..types import Message, PruneAction, StrategyResult
+from ._config import coerce_choice, coerce_non_negative_int, coerce_ordered_pair
+
+_THINKING_MODES: tuple[str, ...] = ("remove", "truncate", "signature-only")
 
 
 @strategy("thinking-blocks", "Truncate or remove thinking/signature blocks", "standard", "2-5%")
@@ -20,7 +23,7 @@ def strategy_thinking_blocks(messages: list[Message], config: dict) -> StrategyR
         'truncate'       - Keep first 200 chars of thinking
         'signature-only' - Only strip signature fields
     """
-    mode = config.get("thinking_mode", "remove")
+    mode = coerce_choice(config, "thinking_mode", _THINKING_MODES, default="remove")
     actions: list[PruneAction] = []
     total_orig = sum(b for _, _, b in messages)
     total_pruned = 0
@@ -92,8 +95,8 @@ def strategy_thinking_blocks(messages: list[Message], config: dict) -> StrategyR
 @strategy("tool-output-trim", "Trim large tool_result blocks (>8KB or >100 lines)", "standard", "1-8%")
 def strategy_tool_output_trim(messages: list[Message], config: dict) -> StrategyResult:
     """Trim oversized tool results while preserving structure."""
-    max_bytes = config.get("tool_output_max_bytes", 8192)
-    max_lines = config.get("tool_output_max_lines", 100)
+    max_bytes = coerce_non_negative_int(config, "tool_output_max_bytes", default=8192)
+    max_lines = coerce_non_negative_int(config, "tool_output_max_lines", default=100)
 
     actions: list[PruneAction] = []
     total_orig = sum(b for _, _, b in messages)
@@ -373,8 +376,9 @@ def strategy_tool_result_age(messages: list[Message], config: dict) -> StrategyR
     Research: JetBrains validated observation masking on SWE-bench — matched
     LLM summarization quality at zero compute cost.
     """
-    mid_age = config.get("tool_result_mid_age", 15)
-    old_age = config.get("tool_result_old_age", 40)
+    mid_age, old_age = coerce_ordered_pair(
+        config, "tool_result_mid_age", "tool_result_old_age", defaults=(15, 40)
+    )
 
     actions: list[PruneAction] = []
     total_orig = sum(b for _, _, b in messages)
