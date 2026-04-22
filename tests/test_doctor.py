@@ -15,9 +15,11 @@ from cozempic.doctor import (
     check_corrupted_tool_use,
     check_hooks_trust_flag,
     check_orphaned_tool_results,
+    check_stale_tmp_artifacts,
     check_zombie_teams,
     fix_claude_json_corruption,
     fix_hooks_trust_flag,
+    fix_stale_tmp_artifacts,
 )
 
 
@@ -334,6 +336,146 @@ class TestAgentModelMismatch(unittest.TestCase):
         with patch("cozempic.doctor.get_claude_dir", return_value=self.claude_dir):
             result = check_agent_model_mismatch()
         self.assertEqual(result.status, "warning")
+
+
+class TestStaleTmpArtifacts(unittest.TestCase):
+    """stale-tmp-artifacts check must detect dead-PID .pid files, their paired
+    .log files, and orphaned hook .lock files — without ever deleting anything
+    still in use (live guard PID or held flock)."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        # patch the /tmp directory used by the check so we stay isolated
+        self._patcher = patch("cozempic.doctor._TMP_DIR", self.tmpdir)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_pid_file(self, slug: str, pid: int) -> Path:
+        p = self.tmpdir / f"cozempic_guard_{slug}.pid"
+        p.write_text(str(pid))
+        return p
+
+    def _make_log_file(self, slug: str, content: str = "log\n") -> Path:
+        p = self.tmpdir / f"cozempic_guard_{slug}.log"
+        p.write_text(content)
+        return p
+
+    def _make_lock_file(self, slug: str) -> Path:
+        p = self.tmpdir / f"cozempic_hook_{slug}.lock"
+        p.write_text("")
+        return p
+
+    # ── check: detection ──────────────────────────────────────────────────────
+    def test_no_artifacts_is_ok(self):
+        result = check_stale_tmp_artifacts()
+        self.assertEqual(result.status, "ok")
+
+    def test_live_guard_is_not_stale(self):
+        """A .pid file pointing to a live cozempic guard + its paired .log
+        must not be flagged."""
+        live_pid = 42
+        self._make_pid_file("livesess-12", live_pid)
+        self._make_log_file("livesess-12")
+        with patch("cozempic.doctor._is_live_guard_pid", return_value=True):
+            result = check_stale_tmp_artifacts()
+        self.assertEqual(result.status, "ok")
+
+    def test_dead_pid_file_is_stale(self):
+        """A .pid file whose PID is no longer a running cozempic guard is stale."""
+        self._make_pid_file("deadsess-01", 999999)
+        with patch("cozempic.doctor._is_live_guard_pid", return_value=False):
+            result = check_stale_tmp_artifacts()
+        self.assertIn(result.status, ("warning", "issue"))
+        self.assertIn("pid", result.message.lower())
+
+    def test_orphan_log_without_pid_is_stale(self):
+        """A .log file with no matching .pid file is an orphan."""
+        self._make_log_file("orphanlog-03")
+        result = check_stale_tmp_artifacts()
+        self.assertIn(result.status, ("warning", "issue"))
+        self.assertIn("log", result.message.lower())
+
+    def test_orphan_lock_is_stale_when_not_held(self):
+        """A .lock file that can be acquired with LOCK_EX|LOCK_NB is orphaned."""
+        self._make_lock_file("oldhook-05")
+        with patch("cozempic.doctor._is_lock_held", return_value=False):
+            result = check_stale_tmp_artifacts()
+        self.assertIn(result.status, ("warning", "issue"))
+        self.assertIn("lock", result.message.lower())
+
+    def test_held_lock_is_not_stale(self):
+        """A .lock file currently held by another process must be preserved."""
+        self._make_lock_file("activehook-06")
+        with patch("cozempic.doctor._is_lock_held", return_value=True):
+            result = check_stale_tmp_artifacts()
+        self.assertEqual(result.status, "ok")
+
+    def test_garbage_pid_content_is_treated_as_stale(self):
+        """Non-integer .pid file content must not crash — treat as stale."""
+        pid_path = self.tmpdir / "cozempic_guard_badcontent-07.pid"
+        pid_path.write_text("not-an-integer")
+        result = check_stale_tmp_artifacts()
+        self.assertIn(result.status, ("warning", "issue"))
+
+    def test_threshold_escalation_to_issue(self):
+        """Many stale artifacts escalate status from warning to issue."""
+        for i in range(15):
+            self._make_pid_file(f"stale{i:02d}-x", 999900 + i)
+        with patch("cozempic.doctor._is_live_guard_pid", return_value=False):
+            result = check_stale_tmp_artifacts()
+        self.assertEqual(result.status, "issue")
+
+    def test_protected_globals_are_never_reported(self):
+        """Global append-only files (breaker state, cozempic_guard.log,
+        cozempic_reload.log) must NEVER be flagged — they are intentional."""
+        (self.tmpdir / "cozempic_guard.log").write_text("global log")
+        (self.tmpdir / "cozempic_reload.log").write_text("reload log")
+        (self.tmpdir / "cozempic_breaker_abc123.json").write_text("{}")
+        result = check_stale_tmp_artifacts()
+        self.assertEqual(result.status, "ok")
+
+    # ── fix: deletion safety ──────────────────────────────────────────────────
+    def test_fix_deletes_stale_pid_and_paired_log(self):
+        self._make_pid_file("deadsess-10", 999999)
+        log_path = self._make_log_file("deadsess-10")
+        with patch("cozempic.doctor._is_live_guard_pid", return_value=False):
+            msg = fix_stale_tmp_artifacts()
+        self.assertFalse((self.tmpdir / "cozempic_guard_deadsess-10.pid").exists())
+        self.assertFalse(log_path.exists())
+        self.assertIn("2", msg)  # reports 2 files deleted
+
+    def test_fix_preserves_live_guard_files(self):
+        pid_path = self._make_pid_file("livesess-20", 42)
+        log_path = self._make_log_file("livesess-20")
+        with patch("cozempic.doctor._is_live_guard_pid", return_value=True):
+            fix_stale_tmp_artifacts()
+        self.assertTrue(pid_path.exists())
+        self.assertTrue(log_path.exists())
+
+    def test_fix_preserves_held_locks(self):
+        lock_path = self._make_lock_file("activehook-21")
+        with patch("cozempic.doctor._is_lock_held", return_value=True):
+            fix_stale_tmp_artifacts()
+        self.assertTrue(lock_path.exists())
+
+    def test_fix_preserves_global_files(self):
+        guard_log = self.tmpdir / "cozempic_guard.log"
+        guard_log.write_text("global")
+        breaker = self.tmpdir / "cozempic_breaker_xyz.json"
+        breaker.write_text("{}")
+        fix_stale_tmp_artifacts()
+        self.assertTrue(guard_log.exists())
+        self.assertTrue(breaker.exists())
+
+    def test_fix_is_idempotent(self):
+        """Running fix twice on empty /tmp returns a sensible message."""
+        msg1 = fix_stale_tmp_artifacts()
+        msg2 = fix_stale_tmp_artifacts()
+        self.assertIn("0", msg1)
+        self.assertIn("0", msg2)
 
 
 if __name__ == "__main__":
