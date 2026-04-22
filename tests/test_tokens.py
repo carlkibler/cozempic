@@ -277,7 +277,7 @@ class TestEstimateSessionTokens(unittest.TestCase):
             make_assistant_with_usage(1, "resp", input_tokens=100000, cache_creation=0, cache_read=0),
         ]
         te = estimate_session_tokens(messages)
-        self.assertEqual(te.context_pct, 50.1)  # (100K + 200 output) / 200K
+        self.assertEqual(te.context_pct, 10.0)  # (100K + 200 output) / 1M
 
 
 class TestQuickTokenEstimate(unittest.TestCase):

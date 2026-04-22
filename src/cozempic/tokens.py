@@ -15,7 +15,7 @@ from .helpers import get_content_blocks, get_msg_type, text_of
 from .types import Message
 
 # Constants
-DEFAULT_CONTEXT_WINDOW = 200_000
+DEFAULT_CONTEXT_WINDOW = 1_000_000  # All current Claude models are 1M. Pro plan users can override with COZEMPIC_CONTEXT_WINDOW=200000.
 SYSTEM_OVERHEAD_TOKENS = 21_000
 
 # 4-tier pruning thresholds as fractions of context window
@@ -112,7 +112,12 @@ TokenEstimate = namedtuple(
 
 
 def detect_model(messages: list[Message]) -> str | None:
-    """Detect the model from the last main-chain assistant message."""
+    """Detect the model from the last main-chain assistant message.
+
+    Skips `<synthetic>` model values — those are injected by Claude Code for
+    compaction summaries, system messages, and other non-API-generated entries.
+    Keeping them would cause fallback to the wrong context window.
+    """
     for _, msg, _ in reversed(messages):
         if get_msg_type(msg) != "assistant":
             continue
@@ -120,7 +125,7 @@ def detect_model(messages: list[Message]) -> str | None:
             continue
         inner = msg.get("message", {})
         model = inner.get("model", "")
-        if model:
+        if model and model != "<synthetic>":
             return model
     return None
 
@@ -218,6 +223,9 @@ def extract_usage_tokens(messages: list[Message]) -> dict | None:
     Returns dict with keys: input_tokens, output_tokens,
     cache_creation_input_tokens, cache_read_input_tokens, total.
     Returns None if no usage data found.
+
+    Skips `<synthetic>` model messages — their usage blocks contain all zeros,
+    which would make the guard think the session is empty.
     """
     # Walk backwards to find the last main-chain assistant with usage
     for _, msg, _ in reversed(messages):
@@ -230,6 +238,9 @@ def extract_usage_tokens(messages: list[Message]) -> dict | None:
             continue
 
         inner = msg.get("message", {})
+        # Skip synthetic messages — their usage is all zeros
+        if inner.get("model") == "<synthetic>":
+            continue
         usage = inner.get("usage")
         if not usage or not isinstance(usage, dict):
             continue
@@ -417,6 +428,8 @@ def quick_token_estimate(path: Path, context_window: int = DEFAULT_CONTEXT_WINDO
                 continue
 
             inner = msg.get("message", {})
+            if inner.get("model") == "<synthetic>":
+                continue
             usage = inner.get("usage")
             if not usage or not isinstance(usage, dict):
                 continue
