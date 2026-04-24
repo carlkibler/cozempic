@@ -186,7 +186,9 @@ class TestExtractCorrections(unittest.TestCase):
         self.assertEqual(rules[0].scope, "file-ops")
 
     def test_caps_rule_length(self):
-        long_text = "don't " + "x" * 1000
+        # Use 501 chars — above the 500-char rule cap but below the 600-char length guard.
+        long_text = "don't " + "x" * 495
+        self.assertLess(len(long_text), 600)  # passes length guard
         messages = [make_user(0, long_text)]
         rules = extract_corrections(messages)
         self.assertLessEqual(len(rules[0].rule), 500)

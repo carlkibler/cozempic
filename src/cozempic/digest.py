@@ -104,6 +104,17 @@ class DigestStore:
 # Classification — FELT taxonomy (heuristic, no LLM)
 # ---------------------------------------------------------------------------
 
+# Synthetic/system message markers — Claude Code injects these as role:user content.
+# Any message containing one of these markers is NOT a user correction.
+_SYNTHETIC_MARKERS = (
+    "<local-command-caveat>",
+    "<command-message>",
+    "<command-name>",
+    "<system-reminder>",
+    "<task-notification>",
+    "This session is being continued from a previous conversation",
+)
+
 # Correction signal patterns
 _EXPLICIT_PATTERNS = [
     re.compile(r"^no[,.\s]", re.IGNORECASE),
@@ -157,6 +168,10 @@ def classify_turn(user_text: str, prev_assistant_text: str = "") -> TurnClass:
     """
     if not user_text or len(user_text.strip()) < 3:
         return "NONE"
+    # Real corrections are concise. Long messages are skill bodies, session summaries,
+    # or command expansions — none of these are user corrections.
+    if len(user_text.strip()) > 600:
+        return "NONE"
 
     # Check if previous assistant apologized → this turn is a follow-up correction
     if prev_assistant_text:
@@ -190,18 +205,23 @@ def classify_turn(user_text: str, prev_assistant_text: str = "") -> TurnClass:
 
 
 def _get_user_text(msg: dict) -> str:
-    """Extract user text from a message."""
+    """Extract user text from a message, filtering synthetic injections."""
     inner = msg.get("message", {})
     content = inner.get("content", "")
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
+        text = content
+    elif isinstance(content, list):
         parts = []
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
                 parts.append(block.get("text", ""))
-        return " ".join(parts)
-    return ""
+        text = " ".join(parts)
+    else:
+        return ""
+    # Skip synthetic/system messages injected by Claude Code as role:user content
+    if any(marker in text for marker in _SYNTHETIC_MARKERS):
+        return ""
+    return text
 
 
 def _get_assistant_text(msg: dict) -> str:
@@ -259,8 +279,10 @@ def _to_prohibition(text: str) -> str:
         if rest:
             return rest[0].upper() + rest[1:]
 
-    # Default: prefix with "Do not"
+    # Default: prefix with "Do not" — only for short, single-line corrections
     if len(text) > 5:
+        if "\n" in text or len(text) > 300:
+            return text  # Don't force prohibition framing on multi-line/long blobs
         return f"Do not {text[0].lower()}{text[1:]}"
     return text
 
@@ -335,7 +357,8 @@ def extract_corrections(
             importance=1,
             source_reliability=reliability_map.get(turn_class, 0.5),
             type_prior=type_prior_map.get(turn_class, 0.5),
-            # Explicit corrections are high-confidence — active immediately
+            # Explicit corrections are high-confidence — active immediately.
+            # False positives are blocked upstream by _get_user_text + classify_turn filters.
             status="active" if turn_class == "EXPLICIT_CORRECTION" else "pending",
             occurrence_count=1,
             first_seen=now,
