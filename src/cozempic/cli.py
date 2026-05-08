@@ -1141,7 +1141,7 @@ def cmd_digest(args):
     from .digest import (
         clear_digest_store, flush_digest,
         load_digest_store, recover_digest,
-        save_digest_store, show_digest, update_digest,
+        sanitize_digest_store, save_digest_store, show_digest, update_digest,
     )
     from .session import load_messages, save_messages
 
@@ -1188,6 +1188,18 @@ def cmd_digest(args):
             print(f"Synced {synced} active rules to Claude Code memory.")
         else:
             print("Could not find Claude Code memory directory.")
+
+    elif action == "sanitize":
+        cwd = getattr(args, "cwd", None) or os.getcwd()
+        store = load_digest_store(cwd)
+        removed = sanitize_digest_store(store)
+        if removed > 0:
+            save_digest_store(store)
+            from .digest import sync_to_memdir
+            sync_to_memdir(store, cwd=cwd)
+            print(f"Removed {removed} corrupted rule(s). Store has {len(store.active_rules())} active rule(s) remaining.")
+        else:
+            print(f"No corrupted rules found. Store has {len(store.active_rules())} active rule(s).")
 
 
 # ─── Parser ───────────────────────────────────────────────────────────────────
@@ -1304,8 +1316,8 @@ def build_parser() -> argparse.ArgumentParser:
     # digest
     p_digest = sub.add_parser("digest", help="Manage behavioral correction rules")
     p_digest.add_argument("digest_action", nargs="?", default="show",
-                          choices=["show", "update", "clear", "flush", "recover", "inject"],
-                          help="Action: show (default), update, clear, flush, recover, inject")
+                          choices=["show", "update", "clear", "flush", "recover", "inject", "sanitize"],
+                          help="Action: show (default), update, clear, flush, recover, inject, sanitize")
     p_digest.add_argument("--session", help=session_help)
     p_digest.add_argument("--cwd", help="Working directory (default: current)")
 
