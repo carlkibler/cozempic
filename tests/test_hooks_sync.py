@@ -34,6 +34,19 @@ class TestHooksSync(unittest.TestCase):
             ),
         )
 
+    def test_stop_hook_suppresses_cozempic_stdout(self):
+        """Stop hooks must not print plain text; Claude parses non-empty stdout as JSON."""
+        canonical = json.loads(DATA_HOOKS.read_text(encoding="utf-8"))
+        command = canonical["hooks"]["Stop"][0]["hooks"][0]["command"]
+
+        from cozempic.init import HOOK_SCHEMA_MARKER
+        self.assertIn(HOOK_SCHEMA_MARKER, command)
+        self.assertIn("cozempic checkpoint >/dev/null 2>&1", command)
+        self.assertIn("python3 -m cozempic checkpoint >/dev/null 2>&1", command)
+        self.assertIn("cozempic digest flush", command)
+        self.assertIn("python3 -m cozempic digest flush", command)
+        self.assertNotIn("cozempic checkpoint 2>/dev/null", command)
+
 
     def test_all_hooks_export_no_auto_init(self):
         """Every hook command must set COZEMPIC_NO_AUTO_INIT=1."""
