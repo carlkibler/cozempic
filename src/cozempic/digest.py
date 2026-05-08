@@ -261,6 +261,10 @@ def classify_turn(user_text: str, prev_assistant_text: str = "") -> TurnClass:
     """
     if not user_text or len(user_text.strip()) < 3:
         return "NONE"
+    # Real corrections are concise. Long messages are skill bodies, session summaries,
+    # or command expansions — none of these are user corrections.
+    if len(user_text.strip()) > 600:
+        return "NONE"
 
     # Check if previous assistant apologized → this turn is a follow-up correction
     if prev_assistant_text:
@@ -294,18 +298,23 @@ def classify_turn(user_text: str, prev_assistant_text: str = "") -> TurnClass:
 
 
 def _get_user_text(msg: dict) -> str:
-    """Extract user text from a message."""
+    """Extract user text from a message, filtering synthetic injections."""
     inner = msg.get("message", {})
     content = inner.get("content", "")
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
+        text = content
+    elif isinstance(content, list):
         parts = []
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
                 parts.append(block.get("text", ""))
-        return " ".join(parts)
-    return ""
+        text = " ".join(parts)
+    else:
+        return ""
+    # Skip synthetic/system messages injected by Claude Code as role:user content.
+    if _is_system_noise(text):
+        return ""
+    return text
 
 
 def _get_assistant_text(msg: dict) -> str:
@@ -367,15 +376,21 @@ def _to_prohibition(text: str) -> str:
     if len(text) > 200:
         _debug(f"_to_prohibition rejected: len={len(text)} > 200 (content redacted)")
         return ""
+    if text[0] in "<-*#`":
+        _debug(f"_to_prohibition rejected: structural-prefix {text[0]!r}")
+        return ""
     if text.count("\n") > 2:
         _debug(
             f"_to_prohibition rejected: multi-paragraph "
             f"({text.count(chr(10))} newlines, content redacted)"
         )
         return ""
-    if text[0] in "<-*#`":
-        _debug(f"_to_prohibition rejected: structural-prefix {text[0]!r}")
-        return ""
+    if "\n" in text:
+        _debug(
+            f"_to_prohibition left multiline text unprefixed "
+            f"({text.count(chr(10))} newlines, content redacted)"
+        )
+        return text
     # Already in prohibition form
     if text.lower().startswith("do not ") or text.lower().startswith("don't "):
         return text[0].upper() + text[1:]
@@ -879,7 +894,35 @@ def _format_rule_4field(rule: DigestRule) -> str:
     return line
 
 
-def build_injection_text(store: DigestStore) -> str | None:
+def _is_corrupted(rule: "DigestRule") -> bool:
+    """Return True if this rule was extracted from synthetic or structural noise."""
+    evidence = (rule.evidence or "").strip()
+    rule_text = (rule.rule or "").strip()
+
+    # Reuse the same gate that protects extraction, then add persisted-store
+    # guards for blobs that should never be injected as concise rules.
+    if not rule_text or _is_system_noise(rule_text):
+        return True
+    if evidence and _is_system_noise(evidence):
+        return True
+    if "\n" in evidence or "\n" in rule_text:
+        return True
+    if len(evidence) > 600 or len(rule_text) > 300:
+        return True
+    if re.match(r"^#\s+\w", evidence) or re.match(r"^#\s+\w", rule_text):
+        return True
+
+    return False
+
+
+def sanitize_digest_store(store: "DigestStore") -> int:
+    """Remove corrupted rules from the store. Returns count removed."""
+    before = len(store.strategy_rules)
+    store.strategy_rules = [r for r in store.strategy_rules if not _is_corrupted(r)]
+    return before - len(store.strategy_rules)
+
+
+def build_injection_text(store: "DigestStore") -> str | None:
     """Build the injection text block from active rules.
 
     Returns None if no active rules exist.
@@ -887,7 +930,7 @@ def build_injection_text(store: DigestStore) -> str | None:
     Prefix: "Focus solely on these behavioral rules when applicable" (arXiv:2505.02709).
     Hard cap: 20 active rules (IFScale).
     """
-    active = store.active_rules()
+    active = [r for r in store.active_rules() if not _is_corrupted(r)]
     if not active:
         return None
 
