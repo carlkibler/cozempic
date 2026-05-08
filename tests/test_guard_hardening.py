@@ -1059,6 +1059,73 @@ class TestNF5_WindowsTaskkillReVerifies(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Worktree-safety — guard must not reload Claude during git transitions
+# ---------------------------------------------------------------------------
+class TestWorktreeSafety_DeferReloadDuringGitTransitions(unittest.TestCase):
+    def test_git_transition_detects_index_lock(self):
+        from cozempic.guard import _git_transition_in_progress
+
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init"], cwd=tmp, check=True, stdout=subprocess.DEVNULL)
+            Path(tmp, ".git", "index.lock").write_text("")
+            self.assertTrue(_git_transition_in_progress(tmp))
+
+    def test_git_transition_ignores_normal_git_repo(self):
+        from cozempic.guard import _git_transition_in_progress
+
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init"], cwd=tmp, check=True, stdout=subprocess.DEVNULL)
+            self.assertFalse(_git_transition_in_progress(tmp))
+
+    def test_guard_prune_defers_reload_when_git_state_is_transient(self):
+        from cozempic.guard import guard_prune_cycle
+
+        class DummyLock:
+            def __init__(self, path):
+                self.path = path
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+
+        msg = {"type": "user", "message": {"content": "hello"}}
+        team_state = MagicMock()
+        team_state.is_empty.return_value = True
+        team_state.team_name = None
+        team_state.message_count = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session_path = Path(tmp) / "session.jsonl"
+            session_path.write_text("{}\n")
+            token_estimates = [MagicMock(total=1000), MagicMock(total=100)]
+
+            with (
+                patch("cozempic.guard._PruneLock", DummyLock),
+                patch("cozempic.guard.load_messages_and_snapshot", return_value=([(0, msg, 1000)], MagicMock())),
+                patch("cozempic.tokens.estimate_session_tokens", side_effect=token_estimates),
+                patch("cozempic.tokens.calibrate_ratio", return_value=1.0),
+                patch("cozempic.guard.prune_with_team_protect", return_value=([(0, msg, 100)], [], team_state)),
+                patch("cozempic.guard.save_messages", return_value=Path(tmp) / "backup.jsonl"),
+                patch("cozempic.guard.cleanup_old_backups"),
+                patch("cozempic.helpers.record_savings"),
+                patch("cozempic.guard._git_transition_in_progress", return_value=True),
+                patch("cozempic.guard._terminate_and_resume") as mock_terminate,
+                patch("cozempic.guard.find_claude_pid", return_value=12345),
+            ):
+                result = guard_prune_cycle(
+                    session_path,
+                    auto_reload=True,
+                    cwd=tmp,
+                    session_id="sess-worktree",
+                    claude_pid=12345,
+                )
+
+        self.assertFalse(result["reloading"])
+        self.assertTrue(result["reload_deferred"])
+        mock_terminate.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # R2-REG-2 — Versioned python binaries (pyenv / Homebrew) must pass
 #
 # Regression: commit be027e0 changed the binary check from
