@@ -919,6 +919,87 @@ def start_guard(
             pass
 
 
+def _git_admin_dir(cwd: str) -> Path | None:
+    """Return this worktree's git admin dir, or None outside git/unavailable dirs."""
+    if not cwd or not Path(cwd).exists():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--git-dir"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = proc.stdout.strip()
+    if not raw:
+        return None
+    git_dir = Path(raw)
+    if not git_dir.is_absolute():
+        git_dir = Path(cwd) / git_dir
+    return git_dir
+
+
+def _git_common_dir(cwd: str) -> Path | None:
+    if not cwd or not Path(cwd).exists():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = proc.stdout.strip()
+    if not raw:
+        return None
+    common_dir = Path(raw)
+    if not common_dir.is_absolute():
+        common_dir = Path(cwd) / common_dir
+    return common_dir
+
+
+def _git_transition_in_progress(cwd: str) -> bool:
+    """True while git is in a fragile state where auto-reloading Claude is risky.
+
+    Worktree switches, rebases, merges, and index writes are exactly when Claude
+    may be mid-edit or recovering local changes. Cozempic should still prune,
+    but should not kill/resume Claude from inside a moving checkout.
+    """
+    if cwd and not Path(cwd).exists():
+        return True
+
+    git_dir = _git_admin_dir(cwd)
+    if git_dir is None:
+        return False
+    common_dir = _git_common_dir(cwd) or git_dir
+
+    markers = (
+        "index.lock",
+        "HEAD.lock",
+        "config.lock",
+        "rebase-merge",
+        "rebase-apply",
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "BISECT_LOG",
+    )
+    for base in {git_dir, common_dir}:
+        for marker in markers:
+            if (base / marker).exists():
+                return True
+    return False
+
+
+
 def guard_prune_cycle(
     session_path: Path,
     rx_name: str = "standard",
@@ -1119,56 +1200,62 @@ def guard_prune_cycle(
     # the prune (post-death), then resume. This closes the #106 race: the live
     # inode is never swapped while Claude holds the file open.
     if auto_reload:
-        reload_pid = claude_pid if claude_pid is not None else find_claude_pid()
-        if reload_pid:
-            from .reload_lock import (
-                _ReloadLock, ReloadLockHeld,
-                INIT_GUARD_HARD1, INIT_GUARD_HARD2,
-            )
-            # Pick initiator based on prescription tier — aggressive ==
-            # Hard2 (80% emergency), everything else == Hard1 (55% standard).
-            initiator = INIT_GUARD_HARD2 if rx_name == "aggressive" else INIT_GUARD_HARD1
-            try:
-                with _ReloadLock(session_id or session_path.stem, initiator=initiator):
-                    _terminate_and_resume(
-                        reload_pid, cwd,
-                        session_id=session_id,
-                        session_path=session_path,
-                        write_pruned=_write_pruned_after_exit,
-                    )
-                # The deferred writer fires only after a confirmed kill, so a
-                # successful write == Claude was terminated == a real reload is
-                # under way. If it did NOT write (anti-resurrection entry gate
-                # because Claude already exited, a failed kill, or an append
-                # conflict), nothing was persisted and no real reload happened —
-                # keep the daemon alive (reloading=False) and leave the full file
-                # for resume. This avoids a misleading "Reload triggered" + exit.
-                if _write_holder["written"]:
-                    result["reloading"] = True
-                    result["backup_path"] = (
-                        str(_write_holder["backup"]) if _write_holder["backup"] else None
-                    )
-                else:
-                    result["saved_mb"] = 0.0
-                    result["live_write_skipped"] = True
-            except ReloadLockHeld as exc:
-                # Another reload pipeline is in flight — it terminates + writes
-                # its own prune. We did NOT write the live file (#106-safe).
-                print(
-                    f"  Reload deferred — another pipeline in flight "
-                    f"({exc.holder_initiator}, PID {exc.holder_pid})."
-                )
-                result["reloading"] = False
-                result["saved_mb"] = 0.0
-                result["live_write_skipped"] = True
-        else:
-            # No live Claude PID found. We cannot prove the file is unheld, so
-            # per #106 we do NOT rewrite it; resume manually from the full file.
-            resume_flag = f"--resume {session_id}" if session_id else "--resume"
-            print("  WARNING: Could not find Claude PID — not reloading, live file left intact.")
-            print(f"  Restart manually: claude {resume_flag}")
+        if _git_transition_in_progress(cwd):
+            result["reload_deferred"] = True
             result["saved_mb"] = 0.0
             result["live_write_skipped"] = True
+            print("  Git worktree/rebase activity detected — deferred Claude reload; live file left intact.")
+        else:
+            reload_pid = claude_pid if claude_pid is not None else find_claude_pid()
+            if reload_pid:
+                from .reload_lock import (
+                    _ReloadLock, ReloadLockHeld,
+                    INIT_GUARD_HARD1, INIT_GUARD_HARD2,
+                )
+                # Pick initiator based on prescription tier — aggressive ==
+                # Hard2 (80% emergency), everything else == Hard1 (55% standard).
+                initiator = INIT_GUARD_HARD2 if rx_name == "aggressive" else INIT_GUARD_HARD1
+                try:
+                    with _ReloadLock(session_id or session_path.stem, initiator=initiator):
+                        _terminate_and_resume(
+                            reload_pid, cwd,
+                            session_id=session_id,
+                            session_path=session_path,
+                            write_pruned=_write_pruned_after_exit,
+                        )
+                    # The deferred writer fires only after a confirmed kill, so a
+                    # successful write == Claude was terminated == a real reload is
+                    # under way. If it did NOT write (anti-resurrection entry gate
+                    # because Claude already exited, a failed kill, or an append
+                    # conflict), nothing was persisted and no real reload happened —
+                    # keep the daemon alive (reloading=False) and leave the full file
+                    # for resume. This avoids a misleading "Reload triggered" + exit.
+                    if _write_holder["written"]:
+                        result["reloading"] = True
+                        result["backup_path"] = (
+                            str(_write_holder["backup"]) if _write_holder["backup"] else None
+                        )
+                    else:
+                        result["saved_mb"] = 0.0
+                        result["live_write_skipped"] = True
+                except ReloadLockHeld as exc:
+                    # Another reload pipeline is in flight — it terminates + writes
+                    # its own prune. We did NOT write the live file (#106-safe).
+                    print(
+                        f"  Reload deferred — another pipeline in flight "
+                        f"({exc.holder_initiator}, PID {exc.holder_pid})."
+                    )
+                    result["reloading"] = False
+                    result["saved_mb"] = 0.0
+                    result["live_write_skipped"] = True
+            else:
+                # No live Claude PID found. We cannot prove the file is unheld, so
+                # per #106 we do NOT rewrite it; resume manually from the full file.
+                resume_flag = f"--resume {session_id}" if session_id else "--resume"
+                print("  WARNING: Could not find Claude PID — not reloading, live file left intact.")
+                print(f"  Restart manually: claude {resume_flag}")
+                result["saved_mb"] = 0.0
+                result["live_write_skipped"] = True
     else:
         # auto_reload=False reaching here = overflow recovery (a substantial prune;
         # SOFT / agents-active returned read-only earlier). Hand the deferred
