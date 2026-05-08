@@ -598,6 +598,87 @@ def start_guard(
             print(f"\n  Guard stopped.")
 
 
+def _git_admin_dir(cwd: str) -> Path | None:
+    """Return this worktree's git admin dir, or None outside git/unavailable dirs."""
+    if not cwd or not Path(cwd).exists():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--git-dir"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = proc.stdout.strip()
+    if not raw:
+        return None
+    git_dir = Path(raw)
+    if not git_dir.is_absolute():
+        git_dir = Path(cwd) / git_dir
+    return git_dir
+
+
+def _git_common_dir(cwd: str) -> Path | None:
+    if not cwd or not Path(cwd).exists():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = proc.stdout.strip()
+    if not raw:
+        return None
+    common_dir = Path(raw)
+    if not common_dir.is_absolute():
+        common_dir = Path(cwd) / common_dir
+    return common_dir
+
+
+def _git_transition_in_progress(cwd: str) -> bool:
+    """True while git is in a fragile state where auto-reloading Claude is risky.
+
+    Worktree switches, rebases, merges, and index writes are exactly when Claude
+    may be mid-edit or recovering local changes. Cozempic should still prune,
+    but should not kill/resume Claude from inside a moving checkout.
+    """
+    if cwd and not Path(cwd).exists():
+        return True
+
+    git_dir = _git_admin_dir(cwd)
+    if git_dir is None:
+        return False
+    common_dir = _git_common_dir(cwd) or git_dir
+
+    markers = (
+        "index.lock",
+        "HEAD.lock",
+        "config.lock",
+        "rebase-merge",
+        "rebase-apply",
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "BISECT_LOG",
+    )
+    for base in {git_dir, common_dir}:
+        for marker in markers:
+            if (base / marker).exists():
+                return True
+    return False
+
+
+
 def guard_prune_cycle(
     session_path: Path,
     rx_name: str = "standard",
@@ -714,14 +795,18 @@ def guard_prune_cycle(
 
     # Trigger reload if configured — terminate Claude then auto-resume
     if auto_reload:
-        reload_pid = claude_pid if claude_pid is not None else find_claude_pid()
-        if reload_pid:
-            _terminate_and_resume(reload_pid, cwd, session_id=session_id)
-            result["reloading"] = True
+        if _git_transition_in_progress(cwd):
+            result["reload_deferred"] = True
+            print("  Git worktree/rebase activity detected — pruned but deferred Claude reload.")
         else:
-            resume_flag = f"--resume {session_id}" if session_id else "--resume"
-            print("  WARNING: Could not find Claude PID. Pruned but not reloading.")
-            print(f"  Restart manually: claude {resume_flag}")
+            reload_pid = claude_pid if claude_pid is not None else find_claude_pid()
+            if reload_pid:
+                _terminate_and_resume(reload_pid, cwd, session_id=session_id)
+                result["reloading"] = True
+            else:
+                resume_flag = f"--resume {session_id}" if session_id else "--resume"
+                print("  WARNING: Could not find Claude PID. Pruned but not reloading.")
+                print(f"  Restart manually: claude {resume_flag}")
 
     return result
 
