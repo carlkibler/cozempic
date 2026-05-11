@@ -138,17 +138,46 @@ def check_oversized_sessions() -> CheckResult:
             message=f"No oversized sessions found ({len(sessions)} sessions checked)",
         )
 
+    sorted_large = sorted(large, key=lambda s: s["size"], reverse=True)
     sizes = ", ".join(
         f"{s['session_id'][:8]}…({s['size'] / 1024 / 1024:.0f}MB)"
-        for s in sorted(large, key=lambda s: s["size"], reverse=True)[:5]
+        for s in sorted_large[:5]
+    )
+    cmds = "\n".join(
+        f"  cozempic treat {s['session_id'][:8]} -rx aggressive --execute"
+        for s in sorted_large
     )
 
     return CheckResult(
         name="oversized-sessions",
         status="issue",
         message=f"{len(large)} session(s) over 50MB: {sizes}. These will likely hang on resume.",
-        fix_description="Run: cozempic treat <session> -rx aggressive --execute",
+        fix_description=f"Run 'cozempic doctor --fix' to treat all at once, or individually:\n{cmds}",
     )
+
+
+def fix_oversized_sessions() -> str:
+    """Apply aggressive treatment to all sessions over 50MB."""
+    from .session import load_messages, save_messages
+    from .registry import PRESCRIPTIONS
+    from .executor import run_prescription
+
+    sessions = find_sessions()
+    large = [s for s in sessions if s["size"] > 50 * 1024 * 1024]
+    if not large:
+        return "No oversized sessions found."
+
+    treated = 0
+    for sess in large:
+        try:
+            messages = load_messages(sess["path"])
+            pruned, _ = run_prescription(messages, PRESCRIPTIONS["aggressive"], {})
+            save_messages(sess["path"], pruned, create_backup=True)
+            treated += 1
+        except Exception as exc:
+            print(f"  Warning: could not treat {sess['session_id'][:8]}: {exc}")
+
+    return f"Treated {treated} oversized session(s) with aggressive prescription. Backups created."
 
 
 def check_stale_backups() -> CheckResult:
@@ -1269,7 +1298,7 @@ ALL_CHECKS: list[tuple[str, callable, callable | None]] = [
     ("orphaned-tool-results", check_orphaned_tool_results, fix_orphaned_tool_results),
     ("zombie-teams", check_zombie_teams, fix_zombie_teams),
     ("agent-model-mismatch", check_agent_model_mismatch, None),
-    ("oversized-sessions", check_oversized_sessions, None),
+    ("oversized-sessions", check_oversized_sessions, fix_oversized_sessions),
     ("stale-backups", check_stale_backups, fix_stale_backups),
     ("stale-tmp-artifacts", check_stale_tmp_artifacts, fix_stale_tmp_artifacts),
     ("disk-usage", check_disk_usage, None),
