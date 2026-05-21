@@ -252,14 +252,36 @@ class OverflowRecovery:
             )
 
         # 6. Terminate Claude + auto-resume
+        # Wave 2: acquire single-flight reload lock. If another reload
+        # pipeline is already in flight (manual `cozempic reload`, guard
+        # threshold-fire, or another overflow recovery instance), defer
+        # ours. The prune output is already saved; the in-flight pipeline
+        # will do the kill+resume.
         claude_pid = self.claude_pid if self.claude_pid is not None else find_claude_pid()
         if claude_pid:
-            _terminate_and_resume(claude_pid, self.cwd, session_id=self.session_id)
-            print(
-                f"  [{now}] Kill + resume triggered (PID {claude_pid}). "
-                f"~10s downtime.",
-                file=sys.stderr,
-            )
+            from .reload_lock import _ReloadLock, ReloadLockHeld, INIT_OVERFLOW
+            try:
+                with _ReloadLock(self.session_id, initiator=INIT_OVERFLOW):
+                    # Pass session_path so the identity check's forked-Claude
+                    # mtime fallback works (happy-path symmetry with
+                    # guard_prune_cycle). The bare-liveness gate in
+                    # _terminate_and_resume still prevents resurrection.
+                    _terminate_and_resume(
+                        claude_pid, self.cwd,
+                        session_id=self.session_id,
+                        session_path=self.session_path,
+                    )
+                    print(
+                        f"  [{now}] Kill + resume triggered (PID {claude_pid}). "
+                        f"~10s downtime.",
+                        file=sys.stderr,
+                    )
+            except ReloadLockHeld as exc:
+                print(
+                    f"  [{now}] Reload deferred — another pipeline in flight "
+                    f"({exc.holder_initiator}, PID {exc.holder_pid}).",
+                    file=sys.stderr,
+                )
         else:
             resume_flag = f"--resume {self.session_id}" if self.session_id else "--resume"
             print(

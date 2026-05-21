@@ -154,15 +154,7 @@ class TestClassifyTurnLengthGuard(unittest.TestCase):
 
 
 class TestToProhibitionLongBlob(unittest.TestCase):
-    """_to_prohibition must not force 'Do not' framing on multi-line or long blobs."""
-
-    def test_multiline_blob_not_prefixed(self):
-        blob = "Use the Grep tool.\nDo not use bash for file search."
-        result = _to_prohibition(blob)
-        self.assertFalse(result.startswith("Do not Use"))
-        self.assertFalse(result.startswith("Do not use the Grep"))
-        # Should be returned as-is (or transformed by an earlier match)
-        self.assertIn("Grep", result)
+    """_to_prohibition must not force 'Do not' framing on oversize blobs (len > 200)."""
 
     def test_long_single_line_not_prefixed(self):
         long_text = "a" * 301

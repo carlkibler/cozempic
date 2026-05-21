@@ -17,6 +17,7 @@ Bugs covered:
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -268,6 +269,20 @@ class TestG4_PidfileWriteIsAtomic(unittest.TestCase):
         self.log_path.unlink(missing_ok=True)
         self.addCleanup(self.pid_path.unlink, missing_ok=True)
         self.addCleanup(self.log_path.unlink, missing_ok=True)
+        # PR #94 added a reload-sentinel gate to start_guard_daemon (returns
+        # "reload in flight" if a sentinel exists for this session). A sentinel
+        # leaked by another test's /tmp pollution would make both concurrent
+        # starts below report started=False. Isolate from sentinel state.
+        from cozempic.reload_lock import unlink_reload_sentinel
+
+        def _safe_unlink_sentinel():
+            try:
+                unlink_reload_sentinel(self.session_id)
+            except OSError:
+                pass
+
+        _safe_unlink_sentinel()
+        self.addCleanup(_safe_unlink_sentinel)
 
     def tearDown(self):
         import shutil
@@ -334,9 +349,13 @@ class TestG4_PidfileWriteIsAtomic(unittest.TestCase):
 
         on_disk_pid = None
         if self.pid_path.exists():
+            # PR #93 item #5: pidfile is now 3-line (pid + ts + initiator).
+            # Parse first line only — mirrors the tolerant production
+            # parser in spawn_lock._parse_pidfile_pid.
             try:
-                on_disk_pid = int(self.pid_path.read_text().strip())
-            except (ValueError, OSError):
+                first_line = self.pid_path.read_text().splitlines()[0].strip()
+                on_disk_pid = int(first_line)
+            except (ValueError, OSError, IndexError):
                 on_disk_pid = None
         return results, on_disk_pid
 
@@ -761,20 +780,22 @@ class TestNF2_MainWatchdogUsesIdentityCheck(unittest.TestCase):
     The loop still only calls `os.kill(claude_pid, 0)` — PID-reuse bug unfixed.
     """
 
+    # Matches _is_claude_process(claude_pid) or _is_claude_process(claude_pid, ...)
+    _IDENTITY_CALL_RE = re.compile(r"_is_claude_process\(\s*claude_pid\b")
+
     def test_watchdog_source_invokes_identity_check(self):
         """Static source contract: start_guard's watchdog section MUST call
-        `_is_claude_process(claude_pid)` — otherwise PID-reuse races through
-        liveness-only `os.kill(pid, 0)`."""
+        `_is_claude_process(claude_pid, ...)` — otherwise PID-reuse races
+        through liveness-only `os.kill(pid, 0)`."""
         import inspect
         from cozempic.guard import start_guard
         src = inspect.getsource(start_guard)
-        has_identity_call = "_is_claude_process(claude_pid)" in src
         self.assertTrue(
-            has_identity_call,
+            self._IDENTITY_CALL_RE.search(src),
             "Main-loop watchdog (guard.py:~414) does not call "
-            "_is_claude_process(claude_pid). BUG-G8 fix added the helper but "
-            "did not wire it into the watchdog — recycled-PID still races "
-            "through `os.kill(pid, 0)` alone.",
+            "_is_claude_process(claude_pid, ...). BUG-G8 fix added the helper "
+            "but did not wire it into the watchdog — recycled-PID still "
+            "races through `os.kill(pid, 0)` alone.",
         )
 
     def test_watchdog_flips_claude_alive_on_identity_fail(self):
@@ -784,12 +805,13 @@ class TestNF2_MainWatchdogUsesIdentityCheck(unittest.TestCase):
         import inspect
         from cozempic.guard import start_guard
         src = inspect.getsource(start_guard)
-        if "_is_claude_process(claude_pid)" not in src:
+        m = self._IDENTITY_CALL_RE.search(src)
+        if not m:
             self.fail(
                 "Watchdog has no identity call at all (see sibling test). "
                 "NF-2: main watchdog still uses liveness-only os.kill(pid, 0)."
             )
-        idx = src.index("_is_claude_process(claude_pid)")
+        idx = m.start()
         window = src[max(0, idx - 100):idx + 400]
         self.assertIn(
             "claude_alive", window,
@@ -872,15 +894,26 @@ class TestNF4_AtomicClaimHandlesNonExistsOsError(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _run_with_os_open_raising(self, errno_code: int):
-        """Invoke start_guard_daemon with a mocked os.open that raises OSError
-        with the given errno on the pidfile path. Returns result dict OR
-        `{'_raised': exc}` if uncaught."""
+        """Invoke start_guard_daemon with a mocked pidfile-write path that
+        raises OSError with the given errno. Returns result dict OR
+        `{'_raised': exc}` if uncaught.
+
+        After the round-3 rework (C1 fix) the pidfile is written via
+        ``os.open(<pid>.tmp, O_CREAT|O_EXCL|O_NOFOLLOW)`` then
+        ``os.rename``, replacing the prior ``Path.write_text``. The intent
+        of this test is unchanged (graceful surface on any OSError) —
+        only the mock surface moves to the new ``os.open`` call. We have
+        to filter on the .pid.tmp suffix because DaemonSpawnClaim also
+        uses os.open on the pid_path itself; only the post-Popen
+        atomic-rename open should fail.
+        """
         from cozempic.guard import start_guard_daemon
 
+        tmp_pidfile_str = str(self.pid_path.with_suffix(".pid.tmp"))
         real_os_open = os.open
 
-        def fake_open(path, flags, *args, **kwargs):
-            if str(path) == str(self.pid_path) and (flags & os.O_EXCL):
+        def fake_os_open(path, flags, *args, **kwargs):
+            if str(path) == tmp_pidfile_str:
                 raise OSError(errno_code, os.strerror(errno_code))
             return real_os_open(path, flags, *args, **kwargs)
 
@@ -888,7 +921,7 @@ class TestNF4_AtomicClaimHandlesNonExistsOsError(unittest.TestCase):
             patch("cozempic.guard._cleanup_legacy_pid"),
             patch("cozempic.guard.find_claude_pid", return_value=7777),
             patch("cozempic.guard.subprocess.Popen") as mock_popen,
-            patch("cozempic.guard.os.open", side_effect=fake_open),
+            patch("cozempic.guard.os.open", side_effect=fake_os_open),
         ):
             mock_popen.return_value = MagicMock(pid=9999)
             try:
@@ -960,7 +993,7 @@ class TestNF5_WindowsTaskkillReVerifies(unittest.TestCase):
         # Call sequence: 1st True (outer verify), subsequent False (post-wait)
         call_sequence = [True, False, False, False, False]
 
-        def fake_is_claude_process(pid):
+        def fake_is_claude_process(pid, **kwargs):
             return call_sequence.pop(0) if call_sequence else False
 
         subprocess_calls = []
@@ -1360,15 +1393,26 @@ class TestDiffCoverage_AtomicPidfile_AllErrnos(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _run_with_os_open_raising(self, exc: Exception):
-        """Invoke start_guard_daemon with a mocked os.open that raises the
-        given exception on EXCL open of our pidfile. Returns result dict OR
-        `{'_raised': exc}` if uncaught."""
+        """Invoke start_guard_daemon with a mocked pidfile-write path that
+        raises the given exception. Returns result dict OR `{'_raised': exc}`
+        if uncaught.
+
+        After the round-3 rework (C1 fix) the pidfile is written via
+        ``os.open(<pid>.tmp, O_CREAT|O_EXCL|O_NOFOLLOW)`` then
+        ``os.rename``, replacing the prior ``Path.write_text``. The intent
+        of this test is unchanged (graceful surface on any OSError) —
+        only the mock surface moves to the new ``os.open`` call. We have
+        to filter on the .pid.tmp suffix because DaemonSpawnClaim also
+        uses os.open on the pid_path itself; only the post-Popen
+        atomic-rename open should fail.
+        """
         from cozempic.guard import start_guard_daemon
 
+        tmp_pidfile_str = str(self.pid_path.with_suffix(".pid.tmp"))
         real_os_open = os.open
 
-        def fake_open(path, flags, *args, **kwargs):
-            if str(path) == str(self.pid_path) and (flags & os.O_EXCL):
+        def fake_os_open(path, flags, *args, **kwargs):
+            if str(path) == tmp_pidfile_str:
                 raise exc
             return real_os_open(path, flags, *args, **kwargs)
 
@@ -1376,7 +1420,7 @@ class TestDiffCoverage_AtomicPidfile_AllErrnos(unittest.TestCase):
             patch("cozempic.guard._cleanup_legacy_pid"),
             patch("cozempic.guard.find_claude_pid", return_value=7777),
             patch("cozempic.guard.subprocess.Popen") as mock_popen,
-            patch("cozempic.guard.os.open", side_effect=fake_open),
+            patch("cozempic.guard.os.open", side_effect=fake_os_open),
         ):
             mock_popen.return_value = MagicMock(pid=9999)
             try:
@@ -1700,7 +1744,7 @@ class TestR3_4_PosixPlainTerminalSigtermHasInnerReverify(unittest.TestCase):
         # Subsequent _is_claude_process calls → False (PID recycled).
         call_sequence = [True, False, False, False, False]
 
-        def fake_is_claude_process(pid):
+        def fake_is_claude_process(pid, **kwargs):
             return call_sequence.pop(0) if call_sequence else False
 
         kill_calls = []
@@ -1764,6 +1808,485 @@ class TestR3_4_PosixPlainTerminalSigtermHasInnerReverify(unittest.TestCase):
             len(sigterm_calls), 1,
             "POSIX plain-terminal SIGTERM did not fire even though identity "
             "stayed True. Fix over-protects and leaves Claude running.",
+        )
+
+
+# ===========================================================================
+# RED TESTS — polish v2 (PR-A) — Bugs from AUDIT_REPORT.md (2026-05-11)
+# ===========================================================================
+#
+# Mapping:
+#   BUG-G13 → TestPolishV2_BugG13PidFileUuidValidation
+#   BUG-G16 → TestPolishV2_BugG16DeadShimRemoved
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# BUG-G13 — _pid_file_for_session must validate session_id as UUID/hex before
+# composing the pidfile path. Current code passes arbitrary strings through to
+# Path("/tmp") / f"cozempic_guard_{session_id[:12]}.pid" enabling both
+# filename collisions and path-traversal writes.
+# ---------------------------------------------------------------------------
+class TestPolishV2_BugG13PidFileUuidValidation(unittest.TestCase):
+
+    def test_uuid_valid_returns_expected_path(self):
+        """Regression: a well-formed UUID session_id still maps to the
+        expected '/tmp/cozempic_guard_<first-12>.pid' path."""
+        from cozempic.guard import _pid_file_for_session
+        uuid = "e6c3a4b2-1234-5678-9abc-def012345678"
+        p = _pid_file_for_session(uuid)
+        self.assertEqual(
+            p, Path("/tmp") / f"cozempic_guard_{uuid[:12]}.pid",
+            "valid UUID should still produce the canonical pidfile path",
+        )
+
+    def test_path_traversal_session_id_rejected(self):
+        """A session_id containing path-traversal sequences (../../etc/pa)
+        MUST raise ValueError. Currently it silently composes a path that
+        resolves outside /tmp/cozempic_guard_*.pid."""
+        from cozempic.guard import _pid_file_for_session
+        with self.assertRaises(
+            ValueError,
+            msg="path-traversal session_id was accepted — BUG-G13",
+        ):
+            _pid_file_for_session("../../etc/pa")
+
+    def test_non_alphanumeric_session_id_rejected(self):
+        """A session_id of the right length but containing characters
+        outside ``[a-z0-9_-]`` MUST raise ValueError. Round-3 C2 Option B
+        RELAXED the char-class from hex-only to lowercase alphanumeric +
+        underscore + dash (matches bash sanitiser + reload_lock slug rules),
+        so non-hex letters like 'z' are now ACCEPTED — see
+        ``test_relaxed_non_hex_session_id_accepted``. But anything outside
+        the relaxed class (uppercase pre-lowercase, slash, dot, colon,
+        ``$``, semicolon) is still rejected so path-traversal and shell-
+        metachar inputs cannot construct a pidfile path."""
+        from cozempic.guard import _pid_file_for_session
+        # Each input contains at least one character not in [a-z0-9_-]
+        # (after lowercasing). All are of valid length (≥12 chars).
+        rejected_inputs = (
+            "session.id.with.dots",     # dots — not in char class
+            "session/path/traversal",   # slashes
+            "session:with:colons",      # colons
+            "session;rm-rf-/;injection",  # semicolons + shell metachar
+            "session$inject_var_xyz",   # dollar sign
+        )
+        for sid in rejected_inputs:
+            with self.assertRaises(
+                ValueError,
+                msg=f"out-of-class session_id was accepted: {sid!r}",
+            ):
+                _pid_file_for_session(sid)
+
+    def test_short_session_id_rejected(self):
+        """Session IDs shorter than the validation minimum MUST raise."""
+        from cozempic.guard import _pid_file_for_session
+        with self.assertRaises(
+            ValueError,
+            msg="too-short session_id was accepted — BUG-G13",
+        ):
+            _pid_file_for_session("abc")
+
+    def test_jsonl_suffix_stripped_then_validated(self):
+        """Regression: _normalize_session_id still runs first, so
+        '/path/<uuid>.jsonl' -> extract UUID -> validation passes."""
+        from cozempic.guard import _pid_file_for_session
+        uuid = "e6c3a4b2-1234-5678-9abc-def012345678"
+        # pass path with .jsonl suffix — normalization picks the stem
+        p = _pid_file_for_session(f"/some/path/{uuid}.jsonl")
+        self.assertEqual(
+            p, Path("/tmp") / f"cozempic_guard_{uuid[:12]}.pid",
+            "jsonl-stripped UUID should validate and map correctly",
+        )
+
+
+# ---------------------------------------------------------------------------
+# BUG-G16 — dead shim _is_guard_running (zero callers) must be removed.
+# Contract is existence-based: after the fix, the symbol is gone from the
+# module. This protects against future regressions where the shim is
+# re-introduced and silently returns None.
+# ---------------------------------------------------------------------------
+class TestPolishV2_BugG16DeadShimRemoved(unittest.TestCase):
+
+    def test_is_guard_running_symbol_removed(self):
+        """The broken legacy shim _is_guard_running must not exist anymore
+        (zero callers in src/, tests/, or plugin/)."""
+        from cozempic import guard
+        self.assertFalse(
+            hasattr(guard, "_is_guard_running"),
+            "_is_guard_running legacy shim still present — BUG-G16 not fixed",
+        )
+
+    def test_is_guard_running_for_session_still_exported(self):
+        """Regression guard: the LIVE session-scoped helper remains
+        exported — it's the real API."""
+        from cozempic import guard
+        self.assertTrue(
+            hasattr(guard, "_is_guard_running_for_session"),
+            "_is_guard_running_for_session wrongly removed — regression",
+        )
+
+    def test_pid_file_alias_retained(self):
+        """Regression: the OTHER legacy alias `_pid_file` (cwd→Path, used by
+        test_guard_robustness) must NOT be deleted alongside the shim."""
+        from cozempic.guard import _pid_file
+        p = _pid_file("/tmp/some/cwd")
+        self.assertTrue(
+            str(p).startswith("/tmp/cozempic_guard_"),
+            "_pid_file legacy alias signature broken — regression",
+        )
+
+
+# ===========================================================================
+# BUG-G13 follow-up hardening (adversarial review findings)
+# ===========================================================================
+# Classes:
+#   TestPolishV2_IsGuardRunningSafeOnInvalidSession
+#     — `_is_guard_running_for_session` and `reload_self_daemon` must return
+#       safe defaults on invalid session_id instead of propagating ValueError
+#       from the pidfile helper.
+#   TestPolishV2_PidFileForSessionCaseNormalization
+#     — same UUID in different cases must map to the same pidfile path
+#       (prevents split-brain daemon spawning).
+#   TestPolishV2_PidFileForSessionValueErrorSanitization
+#     — ValueError message must not echo raw session_id content (PII risk).
+# ===========================================================================
+
+
+class TestPolishV2_IsGuardRunningSafeOnInvalidSession(unittest.TestCase):
+    """`_pid_file_for_session` ValueError must NOT propagate through library
+    API callers (`_is_guard_running_for_session`, `reload_self_daemon`).
+    Those wrappers must catch ValueError and return safe defaults (None or
+    `reloaded=False, reason=...`) so non-CLI callers don't crash. Security
+    contract: `_pid_file_for_session` itself STILL raises on invalid input.
+    """
+
+    def test_is_guard_running_returns_none_on_invalid_session(self):
+        """Non-UUID session_id must return None, not raise."""
+        from cozempic.guard import _is_guard_running_for_session
+        # Must not raise — "no daemon" is the safe default.
+        self.assertIsNone(_is_guard_running_for_session("my-project-session"))
+
+    def test_is_guard_running_returns_none_on_empty_session(self):
+        from cozempic.guard import _is_guard_running_for_session
+        self.assertIsNone(_is_guard_running_for_session(""))
+
+    def test_is_guard_running_returns_none_on_short_session(self):
+        from cozempic.guard import _is_guard_running_for_session
+        self.assertIsNone(_is_guard_running_for_session("abc"))
+
+    def test_reload_self_daemon_returns_safe_dict_on_invalid_session(self):
+        """Non-UUID session_id in reload_self_daemon → safe dict, not raise."""
+        from cozempic.guard import reload_self_daemon
+        result = reload_self_daemon(
+            cwd="/tmp",
+            session_id="my-project-session",
+        )
+        self.assertIsInstance(result, dict)
+        self.assertFalse(result.get("reloaded"))
+        # Should surface that session_id was the problem
+        self.assertIn("session", result.get("reason", "").lower())
+
+    def test_pid_file_for_session_still_raises_on_invalid(self):
+        """Regression: the underlying helper itself still raises —
+        the security contract for filename composition is intact."""
+        from cozempic.guard import _pid_file_for_session
+        with self.assertRaises(ValueError):
+            _pid_file_for_session("not-a-uuid")
+
+
+class TestPolishV2_PidFileForSessionCaseNormalization(unittest.TestCase):
+    """Same logical UUID in different cases must map to the SAME pidfile
+    path. Without case normalization, uppercase / mixed-case variants
+    previously mapped to different paths and enabled split-brain spawning
+    of 2-3 daemons per session. Fix: lowercase BEFORE truncation.
+    """
+
+    def test_uppercase_uuid_same_path_as_lowercase(self):
+        from cozempic.guard import _pid_file_for_session
+        lc = "abcdef12-3456-789a-bcde-f0123456789a"
+        uc = lc.upper()
+        self.assertEqual(
+            _pid_file_for_session(lc),
+            _pid_file_for_session(uc),
+            "UUID case variants mapped to different pid file paths",
+        )
+
+    def test_mixed_case_uuid_same_path_as_lowercase(self):
+        from cozempic.guard import _pid_file_for_session
+        lc = "abcdef12-3456-789a-bcde-f0123456789a"
+        mc = "AbCdEf12-3456-789A-bCdE-F0123456789a"
+        self.assertEqual(
+            _pid_file_for_session(lc),
+            _pid_file_for_session(mc),
+            "mixed-case UUID produced different path",
+        )
+
+    def test_normalized_path_is_lowercase(self):
+        """Post-fix contract: the stored filename uses the lowercased
+        first 12 chars, matching the canonical UUID form."""
+        from cozempic.guard import _pid_file_for_session
+        p = _pid_file_for_session("ABCDEF12-3456-789a-bcde-f0123456789a")
+        # First 12 chars of lowercased input
+        self.assertIn("abcdef12-345", str(p))
+
+
+class TestPolishV2_PidFileForSessionValueErrorSanitization(unittest.TestCase):
+    """ValueError message must NOT echo the raw session_id content via
+    `!r` — a misclassified API key / token passed as session_id would
+    otherwise leak into exception-handler logs. Log type + length only.
+    """
+
+    def test_value_error_message_does_not_echo_raw_session_id(self):
+        from cozempic.guard import _pid_file_for_session
+        # Use an input that fails the relaxed _SESSION_ID_RE
+        # (^[a-z0-9][a-z0-9_-]{11,}$) — leading-dash + special chars
+        # (slashes, dots) are all rejected. C2-Option-B relaxed the
+        # regex from hex-only to lowercase alphanumeric+_-, so the
+        # secret must include a character class NOT in [a-z0-9_-] or
+        # violate the leading-alphanumeric anchor.
+        secret = "/etc/passwd:sensitive_path_token_xyz_should_not_log"
+        with self.assertRaises(ValueError) as ctx:
+            _pid_file_for_session(secret)
+        self.assertNotIn(
+            secret, str(ctx.exception),
+            "ValueError message leaked raw session_id content",
+        )
+
+    def test_value_error_message_mentions_length(self):
+        """Message should include length to aid debugging without
+        echoing content."""
+        from cozempic.guard import _pid_file_for_session
+        with self.assertRaises(ValueError) as ctx:
+            _pid_file_for_session("xx")  # length 2
+        # 'length' keyword or the number 2 should appear
+        msg = str(ctx.exception)
+        self.assertTrue(
+            "length" in msg.lower() or " 2" in msg,
+            f"ValueError message should mention length, got: {msg!r}",
+        )
+
+
+# ===========================================================================
+# BUG-G13 regex tightening — hex-digit-first requirement
+# ===========================================================================
+# Class:
+#   TestPolishV2_SessionIdRegexRequiresHexFirstChar
+#     — the relaxed regex `^[0-9a-fA-F-]{12,}$` accepted pure-dash and
+#       leading-dash strings (collision risk after [:12] truncation).
+# ===========================================================================
+
+
+class TestPolishV2_SessionIdRegexRequiresHexFirstChar(unittest.TestCase):
+    """`_SESSION_ID_RE` must reject pure-dash / leading-dash session ids.
+    The original (pre-G13) regex ``^[0-9a-fA-F-]{12,}$`` accepted them
+    because ``-`` was in the leading-char class — ``'-' * 12`` validated,
+    and any two all-dash inputs of different lengths collided after
+    ``[:12]`` truncation onto the same pidfile path.
+
+    Round-3 C2 fix (Option B per code-auditor sign-off) RELAXED the
+    char-class from hex-only to ``^[a-z0-9][a-z0-9_-]{11,}$`` (matches
+    the bash sanitiser + reload_lock/spawn_lock slug rules), but the
+    leading-alphanumeric anchor (``[a-z0-9]`` for position 0) is KEPT
+    precisely to preserve the dash-collision security property tested
+    here. Class name retained for git-blame history (the class is no
+    longer about "hex first char" specifically; it's about "alphanumeric
+    first char" — same security property, broader char class).
+    """
+
+    def test_pure_dashes_rejected(self):
+        """12 dashes is not a valid session id; must reject."""
+        from cozempic.guard import _pid_file_for_session
+        with self.assertRaises(ValueError):
+            _pid_file_for_session("-" * 12)
+
+    def test_leading_dash_rejected(self):
+        """Session id shape requires an alphanumeric (not dash) in
+        position 0 — defeats dash-collision after [:12] truncation."""
+        from cozempic.guard import _pid_file_for_session
+        with self.assertRaises(ValueError):
+            _pid_file_for_session("-abcdef123456789abcdef")
+
+    def test_dash_collision_prevented(self):
+        """Before fix: `-` * 12 and `-` * 18 accept AND collide after
+        [:12] truncation. After fix (kept under C2 Option B's relaxed
+        char class via the leading-alphanumeric anchor): both reject."""
+        from cozempic.guard import _pid_file_for_session
+        with self.assertRaises(ValueError):
+            _pid_file_for_session("-" * 12)
+        with self.assertRaises(ValueError):
+            _pid_file_for_session("-" * 18)
+
+    def test_valid_hex_uuid_still_accepted(self):
+        """Regression: real hex UUID still works under the relaxed regex
+        (UUIDs are a strict subset of [a-z0-9][a-z0-9_-]{11,})."""
+        from cozempic.guard import _pid_file_for_session
+        uuid = "e6c3a4b2-1234-5678-9abc-def012345678"
+        p = _pid_file_for_session(uuid)
+        self.assertEqual(
+            p, Path("/tmp") / f"cozempic_guard_{uuid[:12]}.pid",
+        )
+
+    def test_relaxed_non_hex_session_id_accepted(self):
+        """C2 Option B regression: non-hex session ids (e.g., with
+        underscores or non-hex letters like `t`, `g`, `z`) are now
+        accepted, matching the bash sanitiser's char set. UUIDs were
+        a strict subset before, so no existing input regresses."""
+        from cozempic.guard import _pid_file_for_session
+        for sid in (
+            "test-session-id-long-enough",  # non-hex letters
+            "abc_123_def_456789",           # underscore
+            "z9z9z9z9z9z9z9z9",             # non-hex 'z'
+        ):
+            p = _pid_file_for_session(sid)
+            self.assertEqual(
+                p, Path("/tmp") / f"cozempic_guard_{sid.lower()[:12]}.pid",
+                f"Relaxed regex must accept {sid!r}",
+            )
+
+
+# ===========================================================================
+# BUG-G13 spawn-path validation (orphan-daemon prevention)
+# ===========================================================================
+# Class:
+#   TestPolishV2_StartGuardDaemonValidatesSessionId
+#     — `start_guard_daemon` previously bypassed `_pid_file_for_session` and
+#       built its own pidfile path from `session_id[:12]`, spawning orphan
+#       daemons for non-UUID session ids.
+# ===========================================================================
+
+
+class TestPolishV2_StartGuardDaemonValidatesSessionId(unittest.TestCase):
+    """`start_guard_daemon` must route pidfile construction through
+    `_pid_file_for_session`. Before the fix it built `pid_path` / `log_file`
+    directly from `session_id[:12]`, spawning daemons at paths the read-side
+    helper (`_is_guard_running_for_session`) couldn't find → orphan daemon,
+    no auto-reload path, no cleanup visibility. Now: on invalid session_id,
+    returns `{started: False, reason: "invalid session_id: ..."}` and
+    spawns nothing.
+    """
+
+    def test_invalid_session_id_does_not_spawn(self):
+        """An out-of-charset session_id (e.g. with path-traversal slashes)
+        must refuse to spawn the daemon — prevents orphaning. Returns
+        ``{started: False, reason mentions session}``.
+
+        Pre-Option-B this test used ``test-session-xyz`` (which Python
+        rejected as non-hex). Post-Option-B the relaxed regex accepts
+        ``[a-z0-9_-]+``, so the test now uses a path-traversal input
+        that's STILL rejected (the ``/`` char is outside the relaxed
+        char class AND is the actual security threat — preventing
+        ``../etc/passwd``-style pidfile paths)."""
+        from cozempic.guard import start_guard_daemon
+        result = start_guard_daemon(
+            cwd="/tmp",
+            session_id="test/session/path-traversal-attempt",
+        )
+        self.assertFalse(
+            result.get("started"),
+            f"daemon spawned with out-of-charset session_id — orphan: {result}",
+        )
+        self.assertIn("session", result.get("reason", "").lower())
+
+    def test_pure_dash_session_id_does_not_spawn(self):
+        """F9/F10 cascade: a pure-dash session_id also rejects at
+        start_guard_daemon entry."""
+        from cozempic.guard import start_guard_daemon
+        result = start_guard_daemon(
+            cwd="/tmp",
+            session_id="-" * 12,
+        )
+        self.assertFalse(
+            result.get("started"),
+            f"daemon spawned with pure-dash session_id: {result}",
+        )
+
+    def test_no_orphan_pidfile_on_invalid_session(self):
+        """Post-fix: a rejected spawn MUST NOT leave a pidfile anywhere,
+        orphan or otherwise. Original RED case: the raw ``[:12]`` path
+        composition would create ``/tmp/cozempic_guard_test-sessio.pid``
+        even when validation should reject. Post-Option-B the input must
+        contain a char outside ``[a-z0-9_-]`` to still be rejected;
+        ``test/path`` does (the ``/``) and is also the actual security
+        threat — path-traversal attempts.
+
+        DA round 3 N5 + N6 extension: also check the bash-derived slug
+        path. The hook would derive a DIFFERENT slug from the same input
+        (via substitution ``re.sub(r'[^a-z0-9_-]', '_', s.lower())[:12]``),
+        and a hypothetical accidental spawn could leave an orphan at that
+        bash-derived path too. The original glob
+        ``cozempic_guard_test/*.pid`` was unreachable on POSIX (``/`` is
+        not a filename char) — replaced with ``cozempic_guard_test*.pid``
+        and the explicit bash-slug computation."""
+        import re
+
+        from cozempic.guard import start_guard_daemon
+
+        invalid_input = "test/path/traversal-attempt"
+        # The bash hook's sanitiser would produce a substitution-derived
+        # slug for the same input — compute it here so we glob both
+        # potential orphan paths (Python-derived AND bash-derived).
+        bash_slug = re.sub(r"[^a-z0-9_-]", "_", invalid_input.lower())[:12]
+        # Patterns to clean BEFORE the test runs (avoid stale files from
+        # a prior interrupted run polluting the orphan check). N6 fix:
+        # `test/*.pid` is unreachable on POSIX → use `test*.pid`.
+        pre_clean_globs = (
+            "cozempic_guard_test-session*.pid",
+            "cozempic_guard_test_path*.pid",
+            "cozempic_guard_test*.pid",
+            f"cozempic_guard_{bash_slug}*.pid",
+        )
+        for pattern in pre_clean_globs:
+            for stale in Path("/tmp").glob(pattern):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+
+        result = start_guard_daemon(
+            cwd="/tmp",
+            session_id=invalid_input,
+        )
+
+        # Collect orphans at BOTH the Python-derived and bash-derived
+        # slug locations. Python validates first → it shouldn't have
+        # written anything anywhere; both lists should be empty.
+        python_orphans = (
+            list(Path("/tmp").glob("cozempic_guard_test-session*.pid"))
+            + list(Path("/tmp").glob("cozempic_guard_test_path*.pid"))
+            + list(Path("/tmp").glob("cozempic_guard_test*.pid"))
+        )
+        bash_orphans = list(Path("/tmp").glob(f"cozempic_guard_{bash_slug}*.pid"))
+
+        # Cleanup any accidentally-spawned daemon from the RED state
+        pid = result.get("pid")
+        if pid:
+            try:
+                import signal
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        for o in python_orphans + bash_orphans:
+            try:
+                o.unlink()
+            except OSError:
+                pass
+
+        self.assertFalse(
+            result.get("started"),
+            "daemon spawned with invalid (out-of-charset) session_id",
+        )
+        self.assertEqual(
+            python_orphans, [],
+            f"Python-derived orphan pidfile(s) left behind: "
+            f"{[str(o) for o in python_orphans]}",
+        )
+        # N5 — separate assertion so the failure message points to the
+        # right slug-derivation source when the regression is bash-side.
+        self.assertEqual(
+            bash_orphans, [],
+            f"bash-derived orphan pidfile(s) at slug={bash_slug!r}: "
+            f"{[str(o) for o in bash_orphans]}",
         )
 
 

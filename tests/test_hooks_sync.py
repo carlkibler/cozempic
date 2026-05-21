@@ -39,7 +39,7 @@ class TestHooksSync(unittest.TestCase):
         canonical = json.loads(DATA_HOOKS.read_text(encoding="utf-8"))
         command = canonical["hooks"]["Stop"][0]["hooks"][0]["command"]
 
-        self.assertIn("cozempic-hook-schema=v6", command)
+        self.assertIn("cozempic-hook-schema=v10", command)
         self.assertIn("cozempic checkpoint >/dev/null 2>&1", command)
         self.assertIn("cozempic digest flush", command)
         self.assertIn("python3 -m cozempic digest flush", command)
