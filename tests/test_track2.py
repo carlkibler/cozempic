@@ -295,8 +295,8 @@ class TestRegistryPrescriptions(unittest.TestCase):
     def test_strategy_count(self):
         """Verify expected strategy counts per tier."""
         self.assertEqual(len(PRESCRIPTIONS["gentle"]), 5)
-        self.assertEqual(len(PRESCRIPTIONS["standard"]), 11)
-        self.assertEqual(len(PRESCRIPTIONS["aggressive"]), 18)
+        self.assertEqual(len(PRESCRIPTIONS["standard"]), 12)
+        self.assertEqual(len(PRESCRIPTIONS["aggressive"]), 19)
 
 
 # ---------------------------------------------------------------------------

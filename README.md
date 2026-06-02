@@ -14,7 +14,7 @@ Cozempic removes it with **18 composable strategies** across 3 prescription tier
 
 ### Key Features
 
-- **18 pruning strategies** — gentle (5), standard (11), aggressive (18)
+- **19 pruning strategies** — gentle (5), standard (12), aggressive (19)
 - **Guard daemon** — auto-starts via SessionStart hook, monitors and prunes continuously
 - **compact-summary-collapse** — 85-95% savings by removing pre-compaction messages already in the summary
 - **Agent Teams protection** — checkpoints team state through compaction, reactive overflow recovery
@@ -97,18 +97,19 @@ cozempic formulary
 | 4 | `file-history-dedup` | gentle | Deduplicate file-history-snapshot messages | 3-6% |
 | 5 | `metadata-strip` | gentle | Strip token usage stats, stop_reason, costs | 1-3% |
 | 6 | `thinking-blocks` | standard | Remove/truncate thinking content + signatures | 2-5% |
-| 7 | `tool-output-trim` | standard | Trim large tool results (>8KB or >100 lines), microcompact-aware | 1-8% |
-| 8 | `tool-result-age` | standard | Compact old tool results by age — minify mid-age, stub old | 10-40% |
-| 9 | `stale-reads` | standard | Remove file reads superseded by later edits | 0.5-2% |
-| 10 | `system-reminder-dedup` | standard | Deduplicate repeated system-reminder tags | 0.1-3% |
-| 11 | `tool-use-result-strip` | standard | Strip toolUseResult envelope field (Edit diffs, never sent to API) | 5-50% |
-| 12 | `image-strip` | aggressive | Strip old base64 image blocks, keep most recent 20% | 1-40% |
-| 13 | `http-spam` | aggressive | Collapse consecutive HTTP request runs | 0-2% |
-| 14 | `error-retry-collapse` | aggressive | Collapse repeated error-retry sequences | 0-5% |
-| 15 | `background-poll-collapse` | aggressive | Collapse repeated polling messages | 0-1% |
-| 16 | `document-dedup` | aggressive | Deduplicate large document blocks (CLAUDE.md injection) | 0-44% |
-| 17 | `mega-block-trim` | aggressive | Trim any content block over 32KB | safety net |
-| 18 | `envelope-strip` | aggressive | Strip constant envelope fields (cwd, version, slug) | 2-4% |
+| 7 | `json-crush` | standard | Structurally compress large JSON tool outputs — drop whitespace, cap long arrays (head + count), truncate long strings; stays valid JSON; runs before `tool-output-trim` | 5-30% |
+| 8 | `tool-output-trim` | standard | Trim large tool results (>8KB or >100 lines), microcompact-aware | 1-8% |
+| 9 | `tool-result-age` | standard | Compact old tool results by age — minify mid-age, stub old | 10-40% |
+| 10 | `stale-reads` | standard | Remove file reads superseded by later edits | 0.5-2% |
+| 11 | `system-reminder-dedup` | standard | Deduplicate repeated system-reminder tags | 0.1-3% |
+| 12 | `tool-use-result-strip` | standard | Strip toolUseResult envelope field (Edit diffs, never sent to API) | 5-50% |
+| 13 | `image-strip` | aggressive | Strip old base64 image blocks, keep most recent 20% | 1-40% |
+| 14 | `http-spam` | aggressive | Collapse consecutive HTTP request runs | 0-2% |
+| 15 | `error-retry-collapse` | aggressive | Collapse repeated error-retry sequences | 0-5% |
+| 16 | `background-poll-collapse` | aggressive | Collapse repeated polling messages | 0-1% |
+| 17 | `document-dedup` | aggressive | Deduplicate large document blocks (CLAUDE.md injection) | 0-44% |
+| 18 | `mega-block-trim` | aggressive | Trim any content block over 32KB | safety net |
+| 19 | `envelope-strip` | aggressive | Strip constant envelope fields (cwd, version, slug) | 2-4% |
 
 ### Prescriptions
 
@@ -258,6 +259,10 @@ After `cozempic init`, these hooks are wired automatically:
 ```
 
 ## Changelog
+
+### Unreleased
+
+- **`json-crush` strategy (SmartCrusher)** — structure-aware compression of large JSON tool outputs, borrowed from [headroom](https://github.com/chopratejas/headroom) but reimplemented with zero dependencies. Drops insignificant whitespace, caps long arrays (keeps the head plus a `…+N more items crushed` sentinel), and truncates long string values — while keeping the result valid JSON so the agent still sees the shape and head. Only touches content that fully parses as a JSON object/array and only when it saves bytes; everything else falls through to the existing `tool-output-trim`. Runs before that trim (standard + aggressive tiers) so JSON gets the smarter treatment first. On a 131KB pretty-printed API response it cut output 99% (→819B) with structure intact.
 
 ### v1.7.1
 

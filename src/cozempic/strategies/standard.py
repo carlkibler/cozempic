@@ -194,6 +194,139 @@ def strategy_tool_output_trim(messages: list[Message], config: dict) -> Strategy
     )
 
 
+def _crush_value(value, keep_items: int, max_str: int, depth: int = 0, max_depth: int = 40):
+    """Recursively shrink a parsed JSON value: cap long arrays, truncate long
+    strings, preserve every object key and all small scalars. Structure-aware,
+    so the agent still sees the shape and head of large outputs."""
+    if depth > max_depth:
+        return value
+    if isinstance(value, dict):
+        return {k: _crush_value(v, keep_items, max_str, depth + 1, max_depth) for k, v in value.items()}
+    if isinstance(value, list):
+        if len(value) > keep_items:
+            head = [_crush_value(v, keep_items, max_str, depth + 1, max_depth) for v in value[:keep_items]]
+            head.append(f"…+{len(value) - keep_items} more items crushed by cozempic")
+            return head
+        return [_crush_value(v, keep_items, max_str, depth + 1, max_depth) for v in value]
+    if isinstance(value, str) and len(value) > max_str:
+        half = max_str // 2
+        return value[:half] + f"…[{len(value) - max_str} chars crushed by cozempic]…" + value[-half:]
+    return value
+
+
+def _crush_json_text(text: str, max_bytes: int, keep_items: int, max_str: int) -> str | None:
+    """Return a compact, structure-aware shrink of `text` if it is JSON object
+    or array content larger than `max_bytes` and crushing actually saves bytes.
+    Returns None (leave untouched) otherwise — non-JSON falls through to the
+    blunt tool-output-trim that runs next."""
+    if not isinstance(text, str) or len(text.encode("utf-8")) <= max_bytes:
+        return None
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, (dict, list)):
+        return None
+    crushed = _crush_value(data, keep_items, max_str)
+    out = json.dumps(crushed, separators=(",", ":"), ensure_ascii=False)
+    if len(out.encode("utf-8")) >= len(text.encode("utf-8")):
+        return None
+    return out
+
+
+@strategy("json-crush", "Structurally compress large JSON tool outputs (SmartCrusher)", "standard", "5-30%")
+def strategy_json_crush(messages: list[Message], config: dict) -> StrategyResult:
+    """Compress oversized JSON tool_result content while keeping it valid JSON.
+
+    Drops insignificant whitespace, caps long arrays (keeping the head plus a
+    count sentinel), and truncates long string values. Only touches content that
+    fully parses as a JSON object/array and only when it saves bytes; everything
+    else is left for the downstream tool-output-trim. Runs before that trim so
+    JSON gets the smarter, structure-preserving treatment first.
+    """
+    max_bytes = coerce_non_negative_int(config, "json_crush_max_bytes", default=8192)
+    keep_items = coerce_non_negative_int(config, "json_crush_keep_items", default=3)
+    max_str = coerce_non_negative_int(config, "json_crush_max_str", default=512)
+
+    actions: list[PruneAction] = []
+    total_orig = sum(b for _, _, b in messages)
+    total_pruned = 0
+    replaced = 0
+
+    compacted_tool_ids: set[str] = set()
+    for _, msg, _ in messages:
+        if msg.get("type") == "system" and msg.get("subtype") == "microcompact_boundary":
+            for tid in msg.get("compactedToolIds", []):
+                compacted_tool_ids.add(tid)
+
+    for idx, msg, size in messages:
+        if is_protected(msg):
+            continue
+        blocks = get_content_blocks(msg)
+        if not blocks:
+            continue
+
+        new_blocks = []
+        changed = False
+        for block in blocks:
+            if block.get("type") != "tool_result":
+                new_blocks.append(block)
+                continue
+            if block.get("tool_use_id", "") in compacted_tool_ids:
+                new_blocks.append(block)
+                continue
+            content = block.get("content", "")
+            if isinstance(content, str):
+                crushed = _crush_json_text(content, max_bytes, keep_items, max_str)
+                if crushed is not None:
+                    new_blocks.append({**block, "content": crushed})
+                    changed = True
+                    continue
+            elif isinstance(content, list):
+                sub_blocks = []
+                sub_changed = False
+                for sub in content:
+                    if isinstance(sub, dict) and sub.get("type") == "text":
+                        crushed = _crush_json_text(sub.get("text", ""), max_bytes, keep_items, max_str)
+                        if crushed is not None:
+                            sub_blocks.append({**sub, "text": crushed})
+                            sub_changed = True
+                            continue
+                    sub_blocks.append(sub)
+                if sub_changed:
+                    new_blocks.append({**block, "content": sub_blocks})
+                    changed = True
+                    continue
+            new_blocks.append(block)
+
+        if changed:
+            new_msg = set_content_blocks(msg, new_blocks)
+            new_size = msg_bytes(new_msg)
+            saved = size - new_size
+            if saved > 0:
+                actions.append(PruneAction(
+                    line_index=idx,
+                    action="replace",
+                    reason="json-crush",
+                    original_bytes=size,
+                    pruned_bytes=new_size,
+                    replacement=new_msg,
+                ))
+                total_pruned += saved
+                replaced += 1
+
+    return StrategyResult(
+        strategy_name="json-crush",
+        actions=actions,
+        original_bytes=total_orig,
+        pruned_bytes=total_pruned,
+        messages_affected=replaced,
+        messages_removed=0,
+        messages_replaced=replaced,
+        summary=f"Crushed {replaced} oversized JSON tool outputs",
+    )
+
+
 @strategy("stale-reads", "Remove file reads superseded by later edits", "standard", "0.5-2%")
 def strategy_stale_reads(messages: list[Message], config: dict) -> StrategyResult:
     """If a file was read and then later edited/written, the read result is stale."""
