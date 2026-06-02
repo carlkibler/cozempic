@@ -260,7 +260,7 @@ After `cozempic init`, these hooks are wired automatically:
 
 ## Changelog
 
-### Unreleased
+### v1.8.19
 
 - **`json-crush` strategy (SmartCrusher)** — structure-aware compression of large JSON tool outputs, borrowed from [headroom](https://github.com/chopratejas/headroom) but reimplemented with zero dependencies. Drops insignificant whitespace, caps long arrays (keeps the head plus a `…+N more items crushed` sentinel), and truncates long string values — while keeping the result valid JSON so the agent still sees the shape and head. Only touches content that fully parses as a JSON object/array and only when it saves bytes; everything else falls through to the existing `tool-output-trim`. Runs before that trim (standard + aggressive tiers) so JSON gets the smarter treatment first. On a 131KB pretty-printed API response it cut output 99% (→819B) with structure intact.
 
