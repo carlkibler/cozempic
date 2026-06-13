@@ -1187,6 +1187,9 @@ def start_guard(
                         print(f"  Pruned: {_fmt_prune_result(result)}")
                     if result.get("team_name"):
                         print(f"  Team '{result['team_name']}' state preserved ({result['team_messages']} messages)")
+                    if result.get("orphaned_guard"):
+                        print(f"  Guard stopping (no live Claude PID for this session).")
+                        break
                     # Reaching here means HARD2 did NOT reload (the reloading branch
                     # above breaks/exits first). Apply the same circuit-breaker
                     # accounting as HARD1 so a sustained deferred-conflict / futile
@@ -1266,6 +1269,9 @@ def start_guard(
                         print(f"  Pruned: {_fmt_prune_result(result)}")
                     if result.get("team_name"):
                         print(f"  Team '{result['team_name']}' state preserved ({result['team_messages']} messages)")
+                    if result.get("orphaned_guard"):
+                        print(f"  Guard stopping (no live Claude PID for this session).")
+                        break
 
                     _account_hard_prune(result, agents_active, state)
                     print()
@@ -1291,18 +1297,12 @@ def start_guard(
                         print(f"  [{_now()}] SOFT THRESHOLD (25%): {reason}")
                         print(f"  Read-only checkpoint — live prune deferred to reload tier (#106) (cycle #{soft_prune_count})...")
 
-                        result = guard_prune_cycle(
-                            session_path=session_path,
-                            rx_name="gentle",
-                            config=config,
-                            auto_reload=False,
-                            cwd=cwd or os.getcwd(),
-                            session_id=sess["session_id"],
-                            read_only_live=True,
-                        )
-
-                        if result.get("team_name"):
-                            print(f"  Team '{result['team_name']}' checkpointed ({result['team_messages']} messages)")
+                        # Read-only means read-only: the Phase-1 checkpoint above
+                        # already refreshed team state. Running the full prune pipeline
+                        # here only computes bytes we intentionally discard, which made
+                        # stale/soft-tier guards chew CPU every interval.
+                        if state and not state.is_empty():
+                            print(f"  Team '{state.team_name}' checkpointed ({state.message_count} messages)")
                         print()
 
                 # ── F: idle poll back-off (decided here, after the tier check) ──
@@ -2102,6 +2102,7 @@ def guard_prune_cycle(
             print(f"  Restart manually: claude {resume_flag}")
             result["saved_mb"] = 0.0
             result["live_write_skipped"] = True
+            result["orphaned_guard"] = True
     else:
         # auto_reload=False reaching here = overflow recovery (a substantial prune;
         # SOFT / agents-active returned read-only earlier). Hand the deferred
