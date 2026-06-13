@@ -110,7 +110,15 @@ class _GuardLoopHarness(unittest.TestCase):
             patch.object(guard_mod.time, "sleep", side_effect=fake_sleep),
             patch.object(guard_mod, "_resolve_session_by_id", return_value=session),
             patch.object(guard_mod, "find_current_session", return_value=session),
-            patch.object(guard_mod, "find_claude_pid", return_value=None),
+            patch.multiple(
+                guard_mod,
+                find_claude_pid=lambda *a, **k: 12345,
+                _record_claude_identity=lambda *a, **k: None,
+                _pid_identity_match=lambda *a, **k: True,
+                _is_claude_process=lambda *a, **k: True,
+                _detect_interactive=lambda *a, **k: False,
+            ),
+            patch.object(guard_mod.os, "kill", return_value=None),
             patch.object(guard_mod, "checkpoint_team", return_value=_FakeState()),
             patch.object(guard_mod, "guard_prune_cycle", side_effect=fake_prune_cycle),
             patch.object(

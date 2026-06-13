@@ -74,11 +74,15 @@ class TestLongitudinalUnprunableLoop(unittest.TestCase):
             "maybe_auto_update": lambda *a, **k: None,
             "_cleanup_stale_watchers": lambda *a, **k: None,
             "_detect_interactive": lambda *a, **k: False,      # headless → no defer
-            "find_claude_pid": lambda *a, **k: None,
+            "find_claude_pid": lambda *a, **k: 12345,
+            "_record_claude_identity": lambda *a, **k: None,
+            "_pid_identity_match": lambda *a, **k: True,
+            "_is_claude_process": lambda *a, **k: True,
             "_safe_unlink_session_pidfile": lambda *a, **k: None,
         }
         cms = [mock.patch.object(G, name, fn) for name, fn in patches.items()]
         cms.append(mock.patch.object(G.time, "sleep", lambda s: self.sleeps.append(s)))
+        cms.append(mock.patch.object(G.os, "kill", lambda *a, **k: None))
         cms.append(mock.patch("cozempic.tokens.detect_context_window", lambda *a, **k: 1_000_000))
         cms.append(mock.patch("cozempic.tokens.default_token_thresholds_4tier",
                               lambda cw: (250_000, 550_000, 800_000)))

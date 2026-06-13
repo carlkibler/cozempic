@@ -991,6 +991,11 @@ def start_guard(
               f"(never mid-turn{_fp}).")
 
     try:
+        if not claude_pid:
+            print(f"  [{_now()}] No live Claude PID found. Final checkpoint and stopping guard.")
+            checkpoint_team(session_path=session_path, quiet=False)
+            return
+
         while True:
             time.sleep(poll_interval)
             try:

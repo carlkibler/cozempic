@@ -45,7 +45,35 @@ class TestStaleDaemonCpuRegressions(unittest.TestCase):
             mock.patch("cozempic.session.record_session"),
         ]
 
-    def test_soft_readonly_tier_does_not_run_prune_pipeline(self):
+    def test_guard_without_claude_pid_exits_before_polling_or_pruning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess = _session(tmpdir)
+            patches = self._common_patches(sess, token_estimate=300_000)
+            prune = mock.Mock(name="guard_prune_cycle")
+            sleep = mock.Mock(name="sleep")
+            patches.extend([
+                mock.patch.object(guard_mod, "guard_prune_cycle", prune),
+                mock.patch.object(guard_mod.time, "sleep", sleep),
+            ])
+            for patcher in patches:
+                patcher.start()
+            try:
+                guard_mod.start_guard(
+                    cwd=tmpdir,
+                    session_id=sess["session_id"],
+                    interval=1,
+                    reactive=False,
+                    auto_reload=True,
+                    threshold_tokens=550_000,
+                    soft_threshold_tokens=250_000,
+                )
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+            sleep.assert_not_called()
+            prune.assert_not_called()
+
+    def test_soft_readonly_tier_with_live_pid_does_not_run_prune_pipeline(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sess = _session(tmpdir)
             patches = self._common_patches(sess, token_estimate=300_000)
@@ -58,6 +86,11 @@ class TestStaleDaemonCpuRegressions(unittest.TestCase):
                     raise nxt
 
             patches.extend([
+                mock.patch.object(guard_mod, "find_claude_pid", return_value=12345),
+                mock.patch.object(guard_mod, "_record_claude_identity"),
+                mock.patch.object(guard_mod, "_pid_identity_match", return_value=True),
+                mock.patch.object(guard_mod, "_is_claude_process", return_value=True),
+                mock.patch.object(guard_mod.os, "kill", return_value=None),
                 mock.patch.object(guard_mod, "guard_prune_cycle", prune),
                 mock.patch.object(guard_mod.time, "sleep", side_effect=fake_sleep),
             ])
@@ -79,7 +112,7 @@ class TestStaleDaemonCpuRegressions(unittest.TestCase):
                     patcher.stop()
             prune.assert_not_called()
 
-    def test_orphaned_hard_guard_exits_instead_of_looping(self):
+    def test_orphaned_hard_result_exits_instead_of_looping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sess = _session(tmpdir)
             patches = self._common_patches(sess, token_estimate=600_000)
@@ -90,6 +123,11 @@ class TestStaleDaemonCpuRegressions(unittest.TestCase):
                 "reloading": False,
             })
             patches.extend([
+                mock.patch.object(guard_mod, "find_claude_pid", return_value=12345),
+                mock.patch.object(guard_mod, "_record_claude_identity"),
+                mock.patch.object(guard_mod, "_pid_identity_match", return_value=True),
+                mock.patch.object(guard_mod, "_is_claude_process", return_value=True),
+                mock.patch.object(guard_mod.os, "kill", return_value=None),
                 mock.patch.object(guard_mod, "guard_prune_cycle", prune),
                 mock.patch.object(guard_mod.time, "sleep", return_value=None),
             ])
