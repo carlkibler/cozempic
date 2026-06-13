@@ -1147,6 +1147,77 @@ def cmd_guard_watchdog(args):
         sys.exit(3)
 
 
+def cmd_guard_report(args):
+    """Summarize local guard audit evidence for a keep/kill decision."""
+    import json
+    from .guard import _guard_tmp_root
+    from .guard_audit import (
+        audit_path,
+        load_guard_events,
+        parse_since,
+        summarize_guard_events,
+        verdict,
+    )
+    from .watchdog import scan_guard_logs
+
+    since = parse_since(getattr(args, "since", None), getattr(args, "days", None))
+    if getattr(args, "since", None) and since is None:
+        print(f"  ERROR: Could not parse --since {args.since!r}. Use ISO format.", file=sys.stderr)
+        sys.exit(2)
+
+    path = Path(getattr(args, "audit_file", None) or audit_path()).expanduser()
+    log_dir = getattr(args, "log_dir", None) or str(_guard_tmp_root())
+    events = load_guard_events(path=path, since=since)
+    summary = summarize_guard_events(events)
+    stuck = scan_guard_logs(log_dir)
+    label, reason = verdict(summary, stuck_loop_count=len(stuck))
+
+    payload = {
+        "verdict": label,
+        "reason": reason,
+        "audit_file": str(path),
+        "log_dir": str(log_dir),
+        "since": since.isoformat() if since else None,
+        "stuck_loops": len(stuck),
+        "summary": summary,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    print("\n  COZEMPIC GUARD VALUE REPORT")
+    print("  ═══════════════════════════════════════════════════════════════════")
+    print(f"  Verdict: {label} — {reason}")
+    print(f"  Audit:   {path}")
+    print(f"  Logs:    {log_dir}")
+    if since:
+        print(f"  Since:   {since.isoformat()}")
+    print()
+    print(f"  Guard starts:       {summary['guard_starts']}")
+    print(f"  Soft checkpoints:   {summary['soft_checkpoints']}")
+    print(f"  Hard checks:        {summary['hard_checks']}")
+    print(f"  Real prunes:        {summary['real_prunes']}")
+    print(f"  Reloads:            {summary['reloads']}")
+    print(f"  Tokens saved:       {summary['tokens_saved']:,}")
+    print(f"  MB saved:           {summary['mb_saved']:.3f}")
+    print(f"  Read-only skips:    {summary['read_only_skips']}")
+    print(f"  No-PID/orphan hits: {summary['orphaned_guard_events']}")
+    print(f"  Reload unsafe:      {summary['reload_unsafe']}")
+    print(f"  Deferred conflicts: {summary['deferred_conflicts']}")
+    print(f"  Stuck loops:        {len(stuck)}")
+    if summary["exits"]:
+        print("  Exits:")
+        for k, v in sorted(summary["exits"].items()):
+            print(f"    - {k}: {v}")
+    if summary["cwds"]:
+        print("  Projects seen:")
+        for cwd in summary["cwds"][:8]:
+            print(f"    - {cwd}")
+        if len(summary["cwds"]) > 8:
+            print(f"    - ... {len(summary['cwds']) - 8} more")
+    print()
+
+
 def cmd_doctor(args):
     """Run health checks on Claude Code configuration and sessions."""
     STATUS_ICONS = {
@@ -1891,6 +1962,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_wd.add_argument("--loop-trip", type=_positive_int, default=20,
                       help="Futile-cycle count that flags a stuck loop (default: 20)")
 
+    # guard-report (local value evidence: keep or kill the daemon)
+    p_gr = sub.add_parser("guard-report",
+                          help="Summarize guard audit evidence for a keep/kill decision")
+    p_gr.add_argument("--days", type=_positive_int, default=7,
+                      help="Look back this many days (default: 7)")
+    p_gr.add_argument("--since", help="ISO timestamp lower bound; overrides --days")
+    p_gr.add_argument("--audit-file", help="Audit JSONL path (default: ~/.cozempic_guard_audit.jsonl)")
+    p_gr.add_argument("--log-dir", help="Directory of guard logs (default: guard tmp root)")
+    p_gr.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
     # formulary
     sub.add_parser("formulary", help="Show all strategies & prescriptions")
 
@@ -1928,6 +2009,7 @@ _SUBCOMMANDS = {
     "list", "current", "diagnose", "treat", "strategy", "reload",
     "checkpoint", "post-compact", "guard", "init", "doctor", "formulary", "completions",
     "digest", "self-update", "remind", "guard-watchdog", "dashboard", "uninstall",
+    "guard-report",
 }
 
 
@@ -2018,6 +2100,7 @@ _AUTO_INIT_SKIP_CMDS = frozenset({
     "guard-watchdog",  # read-only log scan; never mutate project state
     "uninstall",     # the whole point is to REMOVE wiring — must never auto-init
     "dashboard",     # report-only; reads/writes only ~/.cozempic, never project state
+    "guard-report",    # read-only local value report; never mutate project state
 })
 
 _GLOBAL_INIT_MARKER = Path.home() / ".cozempic_global_initialized"
@@ -2436,6 +2519,7 @@ def main():
         "uninstall": cmd_uninstall,
         "doctor": cmd_doctor,
         "guard-watchdog": cmd_guard_watchdog,
+        "guard-report": cmd_guard_report,
         "formulary": cmd_formulary,
         "completions": cmd_completions,
         "digest": cmd_digest,

@@ -521,8 +521,11 @@ def _validate_finite_thresholds(
             raise ConfigError(f"{_name} must be a finite number, got {_v!r}")
 
 
-def _make_sigterm_handler(session_id, session_path, overflow_watcher):
+def _make_sigterm_handler(session_id, session_path, overflow_watcher, on_exit=None):
     """Return the SIGTERM handler for a guard daemon instance.
+
+    `on_exit(signum)` is an optional best-effort callback fired just before
+    sys.exit(0) — used to record a guard_exit audit event on signal death.
 
     Extracted so it can be tested independently (GC-1). The handler:
     1. Writes a final team checkpoint.
@@ -562,6 +565,11 @@ def _make_sigterm_handler(session_id, session_path, overflow_watcher):
                 clear_armed(session_id, session_path)
             except Exception:
                 pass
+            if on_exit is not None:
+                try:
+                    on_exit(signum)
+                except Exception:
+                    pass
         sys.exit(0)
     return _graceful_shutdown
 
@@ -757,11 +765,50 @@ def start_guard(
         )
         watcher_thread.start()
 
+    def _audit(event: str, **fields) -> None:
+        from .guard_audit import record_guard_event
+        record_guard_event(
+            event,
+            session_id=sess.get("session_id"),
+            cwd=cwd or os.getcwd(),
+            session_path=str(session_path),
+            claude_pid=claude_pid,
+            **fields,
+        )
+
+    def _audit_prune_result(tier: str, result: dict, current_tokens: int | None,
+                            current_size: int, agents_active: bool,
+                            defer_for_turn: bool) -> None:
+        original_tokens = result.get("original_tokens")
+        final_tokens = result.get("final_tokens")
+        tokens_saved = (
+            max(0, int(original_tokens) - int(final_tokens))
+            if original_tokens is not None and final_tokens is not None
+            else 0
+        )
+        _audit(
+            "guard_prune_result",
+            tier=tier,
+            current_tokens=current_tokens,
+            current_size=current_size,
+            agents_active=agents_active,
+            defer_for_turn=defer_for_turn,
+            saved_mb=float(result.get("saved_mb") or 0.0),
+            tokens_saved=tokens_saved,
+            reloading=bool(result.get("reloading")),
+            live_write_skipped=bool(result.get("live_write_skipped")),
+            orphaned_guard=bool(result.get("orphaned_guard")),
+            prune_deferred_conflict=bool(result.get("prune_deferred_conflict")),
+            futile_reload_skipped=bool(result.get("futile_reload_skipped")),
+            reload_unsafe=bool(result.get("reload_unsafe")),
+        )
+
     # Graceful shutdown on SIGTERM (GC-1: extracted + hardened — also cleans PID/armed).
     # Use sess["session_id"] (the discovered ID), not the bare session_id arg which
     # is None when the guard is launched without --session (auto-detect path).
     signal.signal(signal.SIGTERM, _make_sigterm_handler(
         session_id=sess["session_id"], session_path=session_path, overflow_watcher=overflow_watcher,
+        on_exit=lambda signum: _audit("guard_exit", reason="signal", signal=signum),
     ))
 
     # Resolve Claude before daemonization or other reparenting can obscure it.
@@ -772,6 +819,19 @@ def start_guard(
     if claude_pid and session_id:
         _record_claude_identity(session_id, claude_pid)
     claude_alive = True
+
+    _audit(
+        "guard_start",
+        threshold_mb=threshold_mb,
+        soft_threshold_mb=soft_threshold_mb,
+        threshold_tokens=threshold_tokens,
+        soft_threshold_tokens=soft_threshold_tokens,
+        hard2_threshold_tokens=hard2_threshold_tokens,
+        context_window=context_window,
+        auto_reload=auto_reload,
+        reactive=reactive,
+        rx_name=rx_name,
+    )
 
     prune_count = 0
     soft_prune_count = 0
@@ -916,6 +976,12 @@ def start_guard(
                             f"finish then starting a fresh session.",
                             flush=True,
                         )
+                        _audit(
+                            "guard_exit",
+                            reason="hard_loop_hard_cap",
+                            consecutive_empty_hard_prunes=consecutive_empty_hard_prunes,
+                            agents_active=agents_active,
+                        )
                     else:
                         # Original K=10 exit (no agents — operator
                         # can safely `/clear`).
@@ -931,6 +997,12 @@ def start_guard(
                             f"split work across fresh sessions to avoid >55% "
                             f"context dominance by immutable tool-result blocks.",
                             flush=True,
+                        )
+                        _audit(
+                            "guard_exit",
+                            reason="hard_loop_powerless",
+                            consecutive_empty_hard_prunes=consecutive_empty_hard_prunes,
+                            agents_active=agents_active,
                         )
                     # _safe_unlink_session_pidfile is called via the
                     # finally block (PR #93 commit 2) — covers this
@@ -994,6 +1066,7 @@ def start_guard(
         if not claude_pid:
             print(f"  [{_now()}] No live Claude PID found. Final checkpoint and stopping guard.")
             checkpoint_team(session_path=session_path, quiet=False)
+            _audit("guard_exit", reason="no_live_pid")
             return
 
         while True:
@@ -1008,6 +1081,7 @@ def start_guard(
                 # Re-check file exists
                 if not session_path.exists():
                     print("  WARNING: Session file disappeared. Stopping guard.")
+                    _audit("guard_exit", reason="session_file_missing")
                     break
 
                 # Watchdog: detect Claude exit (workaround for Stop hook not firing)
@@ -1038,6 +1112,7 @@ def start_guard(
                         _safe_unlink_session_pidfile(sess.get("session_id"))
                         checkpoint_team(session_path=session_path, quiet=False)
                         print(f"  Guard stopping (Claude exited).")
+                        _audit("guard_exit", reason="claude_process_exited")
                         break
 
                 current_size = session_path.stat().st_size
@@ -1201,6 +1276,10 @@ def start_guard(
                     # prune at 80% backs off and eventually exits instead of
                     # spinning kill→no-write→resume forever.
                     _account_hard_prune(result, agents_active, state)
+                    _audit_prune_result(
+                        "hard2", result, current_tokens, current_size,
+                        agents_active, defer_for_turn,
+                    )
                     print()
 
                 # ── Phase 3: HARD1 (55%) — standard + reload (SKIP reload if agents active) ──
@@ -1279,6 +1358,10 @@ def start_guard(
                         break
 
                     _account_hard_prune(result, agents_active, state)
+                    _audit_prune_result(
+                        "hard1", result, current_tokens, current_size,
+                        agents_active, defer_for_turn,
+                    )
                     print()
 
                 # ── Phase 2: SOFT (25%) — gentle, no reload (file maintenance only) ──
@@ -1308,6 +1391,14 @@ def start_guard(
                         # stale/soft-tier guards chew CPU every interval.
                         if state and not state.is_empty():
                             print(f"  Team '{state.team_name}' checkpointed ({state.message_count} messages)")
+                        _audit(
+                            "guard_soft_checkpoint",
+                            current_tokens=current_tokens,
+                            current_size=current_size,
+                            soft_bytes_hit=soft_bytes_hit,
+                            soft_tokens_hit=soft_tokens_hit,
+                            agents_active=agents_active,
+                        )
                         print()
 
                 # ── F: idle poll back-off (decided here, after the tier check) ──
@@ -1373,6 +1464,7 @@ def start_guard(
     except KeyboardInterrupt:
         # Final checkpoint before exit
         checkpoint_team(session_path=session_path, quiet=True)
+        _audit("guard_exit", reason="keyboard_interrupt")
         total_prunes = prune_count + soft_prune_count
         _noop_note = f" ({noop_cycles} idle no-op cycles skipped)" if noop_cycles else ""
         if total_prunes:
