@@ -73,6 +73,9 @@ Cozempic auto-updates from PyPI by default, **on purpose**: Claude Code ships fr
 | Hold a specific reviewed version, keep hooks + guard running | `export COZEMPIC_PIN=1.8.30` |
 | Stop all auto-updates, keep hooks + guard running | `export COZEMPIC_NO_AUTO_UPDATE=1` |
 | No global hooks / no daemon at all (manual CLI only) | `export COZEMPIC_NO_GLOBAL_INIT=1` |
+| Disable execution of already-wired hooks on this host | `export COZEMPIC_DISABLE_HOOKS=1` |
+
+`COZEMPIC_DISABLE_HOOKS` differs from `COZEMPIC_NO_GLOBAL_INIT`: the latter stops cozempic from *wiring* hooks into `settings.json`, but does nothing about hooks already written there. `COZEMPIC_DISABLE_HOOKS=1` is evaluated *inside every hook command*, so it no-ops hooks that are already installed — e.g. a `settings.json` synced (via chezmoi/dotfiles) to a headless box where cozempic shouldn't run at all. Set it in that host's environment (shell profile or `/etc/environment`).
 
 Both `COZEMPIC_NO_AUTO_UPDATE` and `COZEMPIC_PIN` are honored by the Python updater, the SessionStart hook's shell upgrade, and the npm installer. `COZEMPIC_PIN` disables auto-update and warns (not auto-installs) if your running version drifts from the pin, so you stay on a version you've reviewed with a human in the loop. (Releases are published from CI via PyPI [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) — no long-lived upload token — to reduce the chance of a compromised publish in the first place.)
 
@@ -294,6 +297,10 @@ After `cozempic init`, these hooks are wired automatically:
 ### Fork additions
 
 - **`json-crush` strategy (SmartCrusher)** — structure-aware compression of large JSON tool outputs, borrowed from [headroom](https://github.com/chopratejas/headroom) but reimplemented with zero dependencies. Drops insignificant whitespace, caps long arrays (keeps the head plus a `…+N more items crushed` sentinel), and truncates long string values while keeping the result valid JSON. Runs before `tool-output-trim` in standard + aggressive tiers.
+
+### v1.8.40
+
+- **`COZEMPIC_DISABLE_HOOKS` host kill-switch** — every wired hook command now begins with `case ${COZEMPIC_DISABLE_HOOKS:-} in ?*) exit 0 ;; esac;`, so setting `COZEMPIC_DISABLE_HOOKS=1` in a host's environment makes already-installed hooks no-op. Fixes the case where a `settings.json` synced (via chezmoi/dotfiles) to a headless box runs cozempic hooks where it shouldn't — on one box the SessionStart hook fork-bombed (thousands of node procs, swap exhausted, box wedged). POSIX/dash-safe; hook schema `v14 → v15` so existing installs refresh.
 
 ### v1.8.23
 

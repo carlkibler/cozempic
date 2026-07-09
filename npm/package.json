@@ -1,6 +1,6 @@
 {
   "name": "cozempic",
-  "version": "1.8.39",
+  "version": "1.8.40",
   "description": "Context weight-loss for Claude Code — prune bloated sessions, protect Agent Teams from compaction",
   "keywords": [
     "claude",
